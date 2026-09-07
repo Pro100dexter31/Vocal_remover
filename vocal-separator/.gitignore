@@ -2,3 +2,33 @@
 __pycache__/
 *.py[cod]
 .env
+
+# Python environments and build artifacts
+venv/
+.python-version
+*.egg-info/
+dist/
+build/
+
+# Node and frontend artifacts
+node_modules/
+.env.local
+.env.*.local
+npm-debug.log*
+
+# IDE and operating system files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Runtime data and logs
+/uploads/
+/outputs/
+/backend/uploads/*
+!/backend/uploads/.gitkeep
+/backend/outputs/*
+!/backend/outputs/.gitkeep
+*.log
