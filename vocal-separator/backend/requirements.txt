@@ -22,11 +22,13 @@ numpy==1.23.5
 # Scientific computing utilities used by audio processing libraries
 scipy==1.10.1
 
-# TensorFlow backend required by Spleeter
-tensorflow==2.12.0
+# TensorFlow backend required by Spleeter 2.4.0 (requires >=2.5 and <2.10)
+tensorflow-macos==2.9.2; platform_system == "Darwin" and platform_machine == "arm64"
+tensorflow==2.9.2; platform_system != "Darwin" or platform_machine != "arm64"
 
-# PyTorch backend for compatible audio and model workflows
-torch==2.1.0
+# PyTorch backend compatible with Python 3.9 and Apple Silicon
+torch==2.0.1; python_version < "3.10"
+torch==2.1.0; python_version >= "3.10"
 
 # Multipart form parsing for uploaded audio files
 python-multipart==0.0.6
