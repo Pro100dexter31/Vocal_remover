@@ -60,24 +60,54 @@ function App() {
     setStatus('UPLOADING');
     const formData = new FormData();
     formData.append('file', file);
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/upload`, { method: 'POST', body: formData });
-      const responseText = await response.text();
-      let data;
-      try {
-        data = JSON.parse(responseText);
-      } catch {
-        throw new Error(`Upload failed (${response.status}). The server did not return JSON.`);
-      }
-      if (!response.ok) throw new Error(data.detail || 'Upload failed.');
-      setTaskId(data.task_id);
-      setStatus(data.status || 'PENDING');
-      startPolling(data.task_id);
-    } catch (uploadError) {
+
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+
+      xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable) {
+          const uploadPercent = Math.round((e.loaded / e.total) * 100);
+          setProgress(uploadPercent);
+        }
+      });
+
+      xhr.addEventListener('load', () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            const data = JSON.parse(xhr.responseText);
+            setTaskId(data.task_id);
+            setStatus(data.status || 'PENDING');
+            setProgress(100);
+            startPolling(data.task_id);
+            resolve();
+          } catch (e) {
+            reject(new Error('Upload failed: Server did not return valid JSON'));
+          }
+        } else {
+          try {
+            const data = JSON.parse(xhr.responseText);
+            reject(new Error(data.detail || `Upload failed (${xhr.status})`));
+          } catch {
+            reject(new Error(`Upload failed (${xhr.status})`));
+          }
+        }
+      });
+
+      xhr.addEventListener('error', () => {
+        reject(new Error('Network error during upload'));
+      });
+
+      xhr.addEventListener('abort', () => {
+        reject(new Error('Upload cancelled'));
+      });
+
+      xhr.open('POST', `${API_BASE_URL}/api/upload`);
+      xhr.send(formData);
+    }).catch((uploadError) => {
       setError(uploadError.message || 'Upload failed.');
       setStatus('FAILED');
       setLoading(false);
-    }
+    });
   };
 
   const handleFile = (file) => {
@@ -149,11 +179,24 @@ function App() {
   );
 
   const renderSuccessState = () => status === 'SUCCESS' && (
-    <div className="mt-6 grid gap-4 sm:grid-cols-2 animate-slide-in-right">
-      {[['vocals', 'Vocals stem', results.vocalsUrl], ['accompaniment', 'Accompaniment stem', results.accompanimentUrl]].map(([type, label, source]) => {
-        const url = source?.startsWith('http') ? source : `${API_BASE_URL}${source || ''}`;
-        return <div key={type} className="rounded-2xl border border-slate-700 bg-slate-900/70 p-4"><p className="mb-3 font-semibold">{label}</p><audio className="mb-4 w-full" controls src={url} /><button type="button" onClick={() => handleDownload(type)} className="w-full rounded-xl bg-primary-600 px-4 py-3 font-semibold hover:bg-primary-500">Download {type}.wav</button></div>;
-      })}
+    <div className="mt-6 animate-slide-in-right">
+      <p className="mb-4 text-sm font-semibold text-emerald-300">Gata! Piesa a fost separată — mai jos poți asculta și descărca minusul (fără voce) și vocea izolată.</p>
+      <div className="grid gap-4 sm:grid-cols-2">
+        {[
+          ['accompaniment', 'Minus (fără voce)', 'Instrumentalul piesei, fără voce — acesta e minusul.', results.accompanimentUrl, true],
+          ['vocals', 'Voce izolată', 'Doar vocea, fără instrumental.', results.vocalsUrl, false],
+        ].map(([type, label, description, source, primary]) => {
+          const url = source?.startsWith('http') ? source : `${API_BASE_URL}${source || ''}`;
+          return (
+            <div key={type} className={`rounded-2xl border p-4 ${primary ? 'border-primary-400/60 bg-primary-500/10' : 'border-slate-700 bg-slate-900/70'}`}>
+              <p className="font-semibold">{label}</p>
+              <p className="mt-1 mb-3 text-xs text-slate-400">{description}</p>
+              <audio className="mb-4 w-full" controls src={url} />
+              <button type="button" onClick={() => handleDownload(type)} className="w-full rounded-xl bg-primary-600 px-4 py-3 font-semibold hover:bg-primary-500">Descarcă {label.toLowerCase()}</button>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 

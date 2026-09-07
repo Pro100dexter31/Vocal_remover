@@ -2,7 +2,8 @@ FROM python:3.10-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    TORCH_HOME=/app/.cache/torch
 
 WORKDIR /app
 
@@ -13,12 +14,22 @@ RUN apt-get update \
     && adduser --system --ingroup app app
 
 COPY backend/requirements.txt /app/backend/requirements.txt
+
+# On arm64 the default PyPI wheels are already CPU-only; on amd64 the dedicated
+# CPU index avoids pulling in the multi-gigabyte CUDA runtime.
+ARG TARGETARCH
 RUN pip install --upgrade pip \
-    && grep -Ev '^(spleeter|torch)==' /app/backend/requirements.txt > /tmp/requirements-without-spleeter-torch.txt \
-    && pip install --index-url https://download.pytorch.org/whl/cpu torch==2.1.0 \
-    && pip install -r /tmp/requirements-without-spleeter-torch.txt \
-    && pip install --no-deps spleeter==2.4.0 \
-    && rm /tmp/requirements-without-spleeter-torch.txt
+    && if [ "$TARGETARCH" = "arm64" ]; then \
+         pip install torch==2.5.1 torchaudio==2.5.1; \
+       else \
+         pip install --index-url https://download.pytorch.org/whl/cpu torch==2.5.1 torchaudio==2.5.1; \
+       fi \
+    && grep -Ev '^(torch|torchaudio)==' /app/backend/requirements.txt > /tmp/requirements-rest.txt \
+    && pip install -r /tmp/requirements-rest.txt \
+    && rm /tmp/requirements-rest.txt
+
+# Bake the pretrained model into the image so the first job does not wait on a download.
+RUN python -c "from demucs.pretrained import get_model; get_model('htdemucs')"
 
 COPY backend /app/backend
 RUN mkdir -p /app/backend/uploads /app/backend/outputs \

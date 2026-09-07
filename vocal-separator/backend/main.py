@@ -15,9 +15,7 @@ from pydantic import BaseModel
 
 from .config import (
 	ALLOWED_EXTENSIONS,
-	CELERY_RESULT_BACKEND,
 	CORS_ORIGINS,
-	LOGGER,
 	MAX_FILE_SIZE_BYTES,
 	OUTPUTS_DIR,
 	UPLOADS_DIR,
@@ -48,7 +46,7 @@ def _status_payload(task_id: str, result: AsyncResult) -> dict[str, Any]:
 	state = result.state
 	payload: dict[str, Any] = {
 		"task_id": task_id,
-		"status": "PROCESSING" if state == "STARTED" else state,
+		"status": "PROCESSING" if state in ("STARTED", "RETRY") else state,
 		"progress": int(info.get("progress", 0)),
 		"vocals_url": info.get("vocals_url"),
 		"accompaniment_url": info.get("accompaniment_url"),
@@ -119,7 +117,7 @@ async def upload_audio(file: UploadFile = File(...)) -> UploadResponse:
 					raise HTTPException(status_code=413, detail="File exceeds the 500 MB limit")
 				output_file.write(chunk)
 		await file.close()
-		process_audio_task.delay(task_id, str(destination))
+		process_audio_task.apply_async(args=[task_id, str(destination)], task_id=task_id)
 	except HTTPException:
 		destination.unlink(missing_ok=True)
 		raise

@@ -48,6 +48,11 @@ UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+# Uploads and separated stems are deleted once they are older than this.
+RETENTION_HOURS = int(os.getenv("RETENTION_HOURS", "24"))
+CLEANUP_INTERVAL_MINUTES = int(os.getenv("CLEANUP_INTERVAL_MINUTES", "60"))
+
+
 # Development frontend origins. Override with a comma-separated .env value.
 _cors_origins = os.getenv(
 	"CORS_ORIGINS",
@@ -56,9 +61,22 @@ _cors_origins = os.getenv(
 CORS_ORIGINS = [origin.strip() for origin in _cors_origins.split(",") if origin.strip()]
 
 
-# Spleeter model that produces vocals and accompaniment stems.
-SPLEETER_MODEL = os.getenv("SPLEETER_MODEL", "2stems")
-AUDIO_BITRATE = os.getenv("AUDIO_BITRATE", "192k")
+# Demucs model used to split a track into vocals and instrumental stems.
+# htdemucs is the v4 hybrid transformer model; htdemucs_ft is slower but cleaner.
+DEMUCS_MODEL = os.getenv("DEMUCS_MODEL", "htdemucs")
+
+# Higher overlap means better quality and slower processing (Demucs default 0.25).
+DEMUCS_OVERLAP = float(os.getenv("DEMUCS_OVERLAP", "0.25"))
+
+# Cores used for separation. Defaults to 60% of them so the machine stays cool
+# and responsive; set DEMUCS_THREADS to override.
+_default_threads = max(1, int((os.cpu_count() or 1) * 0.6))
+DEMUCS_THREADS = max(1, int(os.getenv("DEMUCS_THREADS", _default_threads)))
+
+# Measured CPU cost per second of audio, used only to estimate progress.
+DEMUCS_SECONDS_PER_AUDIO_SECOND = float(
+	os.getenv("DEMUCS_SECONDS_PER_AUDIO_SECOND", "1.2")
+)
 
 
 # Accepted audio formats and maximum upload size (500 MB by default).

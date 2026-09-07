@@ -10,31 +10,18 @@ celery==5.3.4
 # Redis client used as the Celery broker and result backend
 redis==5.0.1
 
-# Vocal and accompaniment separation using the Meta audio model
-spleeter==2.4.0
+# Hybrid Transformer Demucs: state-of-the-art vocal/instrumental separation
+demucs==4.0.1
 
-# Spleeter runtime dependencies (installed separately from its incompatible CLI typer pin)
-ffmpeg-python==0.2.0
-httpx==0.19.0
-norbert==0.2.1
-pandas==1.5.3
+# PyTorch backend for Demucs (CPU wheels installed from the PyTorch index)
+torch==2.5.1
+torchaudio==2.5.1
 
-# Audio loading, analysis, and feature extraction
-librosa==0.10.1
+# Pinned below 2.0 to stay ABI-compatible with the torch wheels
+numpy==1.26.4
 
-# Numerical operations required by the audio processing pipeline
-numpy==1.23.5
-
-# Scientific computing utilities used by audio processing libraries
-scipy==1.10.1
-
-# TensorFlow backend required by Spleeter 2.4.0 (requires >=2.5 and <2.10)
-tensorflow-macos==2.9.2; platform_system == "Darwin" and platform_machine == "arm64"
-tensorflow==2.9.2; platform_system != "Darwin" or platform_machine != "arm64"
-
-# PyTorch backend compatible with Python 3.9 and Apple Silicon
-torch==2.0.1; python_version < "3.10"
-torch==2.1.0; python_version >= "3.10"
+# Backend torchaudio uses to write the separated WAV stems
+soundfile==0.12.1
 
 # Multipart form parsing for uploaded audio files
 python-multipart==0.0.6
