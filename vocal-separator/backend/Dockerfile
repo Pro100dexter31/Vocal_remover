@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.10-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -14,7 +14,11 @@ RUN apt-get update \
 
 COPY backend/requirements.txt /app/backend/requirements.txt
 RUN pip install --upgrade pip \
-    && pip install -r /app/backend/requirements.txt
+    && grep -Ev '^(spleeter|torch)==' /app/backend/requirements.txt > /tmp/requirements-without-spleeter-torch.txt \
+    && pip install --index-url https://download.pytorch.org/whl/cpu torch==2.1.0 \
+    && pip install -r /tmp/requirements-without-spleeter-torch.txt \
+    && pip install --no-deps spleeter==2.4.0 \
+    && rm /tmp/requirements-without-spleeter-torch.txt
 
 COPY backend /app/backend
 RUN mkdir -p /app/backend/uploads /app/backend/outputs \
