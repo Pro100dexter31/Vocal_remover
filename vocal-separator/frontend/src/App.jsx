@@ -62,7 +62,13 @@ function App() {
     formData.append('file', file);
     try {
       const response = await fetch(`${API_BASE_URL}/api/upload`, { method: 'POST', body: formData });
-      const data = await response.json();
+      const responseText = await response.text();
+      let data;
+      try {
+        data = JSON.parse(responseText);
+      } catch {
+        throw new Error(`Upload failed (${response.status}). The server did not return JSON.`);
+      }
       if (!response.ok) throw new Error(data.detail || 'Upload failed.');
       setTaskId(data.task_id);
       setStatus(data.status || 'PENDING');
