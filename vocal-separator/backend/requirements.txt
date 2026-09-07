@@ -1,0 +1,38 @@
+# API web and CORS middleware
+fastapi==0.104.1
+
+# ASGI server for running the FastAPI application
+uvicorn[standard]==0.24.0
+
+# Distributed task queue for background audio separation jobs
+celery==5.3.4
+
+# Redis client used as the Celery broker and result backend
+redis==5.0.1
+
+# Vocal and accompaniment separation using the Meta audio model
+spleeter==2.4.0
+
+# Audio loading, analysis, and feature extraction
+librosa==0.10.1
+
+# Numerical operations required by the audio processing pipeline
+numpy==1.23.5
+
+# Scientific computing utilities used by audio processing libraries
+scipy==1.10.1
+
+# TensorFlow backend required by Spleeter
+tensorflow==2.12.0
+
+# PyTorch backend for compatible audio and model workflows
+torch==2.1.0
+
+# Multipart form parsing for uploaded audio files
+python-multipart==0.0.6
+
+# Request and response data validation for FastAPI
+pydantic==2.4.2
+
+# Loading configuration values from environment files
+python-dotenv==1.0.0
