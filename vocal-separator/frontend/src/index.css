@@ -1,0 +1,47 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+	--color-primary: #3b82f6;
+	--color-primary-dark: #1d4ed8;
+	--color-secondary: #8b5cf6;
+	--color-accent: #ec4899;
+	--color-success: #22c55e;
+	--color-warning: #f59e0b;
+	--color-error: #ef4444;
+	--color-surface: #0f1d31;
+	--color-surface-raised: #172842;
+	--color-text: #f8fafc;
+	--color-muted: #94a3b8;
+	--shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.28);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { min-width: 320px; background: #07111f; color: var(--color-text); font-family: Inter, ui-sans-serif, system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+button, input { font: inherit; }
+button { transition: transform .2s ease, opacity .2s ease, box-shadow .2s ease; }
+button:not(:disabled):hover { transform: translateY(-1px); }
+button:not(:disabled):active { transform: translateY(0); }
+button:disabled { cursor: not-allowed; opacity: .55; }
+:focus-visible { outline: 3px solid rgba(96, 165, 250, .85); outline-offset: 3px; }
+::selection { background: rgba(59, 130, 246, .4); }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: #0a1627; }
+::-webkit-scrollbar-thumb { background: #294568; border: 2px solid #0a1627; border-radius: 999px; }
+
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes slideInLeft { from { opacity: 0; transform: translateX(-1rem); } to { opacity: 1; transform: translateX(0); } }
+@keyframes slideInRight { from { opacity: 0; transform: translateX(1rem); } to { opacity: 1; transform: translateX(0); } }
+@keyframes pulse { 50% { opacity: .55; } }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes bounce { 0%, 100% { transform: translateY(-4%); } 50% { transform: none; } }
+
+@layer utilities {
+	.glass-effect { background: rgba(15, 29, 49, .72); border: 1px solid rgba(148, 163, 184, .16); box-shadow: var(--shadow-lg); backdrop-filter: blur(18px); }
+	.gradient-primary { background: linear-gradient(135deg, var(--color-primary-dark), var(--color-secondary)); }
+	.animate-fade-in { animation: fadeIn .5s ease-out both; }
+	.animate-slide-in-left { animation: slideInLeft .5s ease-out both; }
+	.animate-slide-in-right { animation: slideInRight .5s ease-out both; }
+}

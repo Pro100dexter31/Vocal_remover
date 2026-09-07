@@ -58,6 +58,7 @@ CORS_ORIGINS = [origin.strip() for origin in _cors_origins.split(",") if origin.
 
 # Spleeter model that produces vocals and accompaniment stems.
 SPLEETER_MODEL = os.getenv("SPLEETER_MODEL", "2stems")
+AUDIO_BITRATE = os.getenv("AUDIO_BITRATE", "192k")
 
 
 # Accepted audio formats and maximum upload size (500 MB by default).
