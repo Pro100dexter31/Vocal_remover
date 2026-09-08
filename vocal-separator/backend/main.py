@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from .config import (
 	ALLOWED_EXTENSIONS,
+	AUDIO_OUTPUT_FORMAT,
 	CORS_ORIGINS,
 	MAX_FILE_SIZE_BYTES,
 	OUTPUTS_DIR,
@@ -144,12 +145,30 @@ async def download_audio(
 	task_id: str,
 	file_type: Literal["vocals", "accompaniment"],
 ) -> FileResponse:
-	file_path = OUTPUTS_DIR / task_id / f"{file_type}.wav"
+	# Optimization: Try MP3 first (smaller files), fallback to WAV for backward compatibility
+	if AUDIO_OUTPUT_FORMAT == "mp3":
+		file_path = OUTPUTS_DIR / task_id / f"{file_type}.mp3"
+		media_type = "audio/mpeg"
+		filename = f"{file_type}.mp3"
+	else:
+		file_path = OUTPUTS_DIR / task_id / f"{file_type}.wav"
+		media_type = "audio/wav"
+		filename = f"{file_type}.wav"
+
+	# Fallback: check other format if file not found
 	if not file_path.is_file():
-		raise HTTPException(status_code=404, detail="Audio output not found")
+		alt_format = "wav" if AUDIO_OUTPUT_FORMAT == "mp3" else "mp3"
+		alt_path = OUTPUTS_DIR / task_id / f"{file_type}.{alt_format}"
+		if alt_path.is_file():
+			file_path = alt_path
+			media_type = "audio/wav" if alt_format == "wav" else "audio/mpeg"
+			filename = f"{file_type}.{alt_format}"
+		else:
+			raise HTTPException(status_code=404, detail="Audio output not found")
+
 	return FileResponse(
 		path=file_path,
-		media_type="audio/wav",
-		filename=f"{file_type}.wav",
-		headers={"Content-Disposition": f'attachment; filename="{file_type}.wav"'},
+		media_type=media_type,
+		filename=filename,
+		headers={"Content-Disposition": f'attachment; filename="{filename}"'},
 	)

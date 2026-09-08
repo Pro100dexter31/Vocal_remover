@@ -85,6 +85,14 @@ MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "500"))
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
 
+# Audio output format and compression settings (optimization).
+AUDIO_OUTPUT_FORMAT = os.getenv("AUDIO_OUTPUT_FORMAT", "mp3").lower()
+MP3_BITRATE = os.getenv("MP3_BITRATE", "192k")
+
+# Model idle timeout: unload from RAM if idle > N seconds to save memory.
+MODEL_IDLE_TIMEOUT_SECONDS = int(os.getenv("MODEL_IDLE_TIMEOUT_SECONDS", "300"))
+
+
 # Basic application logging; LOG_LEVEL can be changed through .env.
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(

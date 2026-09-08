@@ -31,3 +31,6 @@ pydantic==2.4.2
 
 # Loading configuration values from environment files
 python-dotenv==1.0.0
+
+# Audio format conversion for MP3 compression (optimization)
+pydub==0.25.1
