@@ -102,11 +102,17 @@ def get_or_create_separator():
 	return _separator
 
 
-def _separate_stems(model, audio_path: Path, output_dir: Path, on_progress=None) -> None:
+def _separate_stems(model, audio_path: Path, output_dir: Path, separation_intensity: float = 0.5, on_progress=None) -> None:
 	"""Split the track into vocals and accompaniment inside output_dir.
 
 	Demucs exposes no progress callback, so progress is estimated from elapsed
 	time against the track duration while separation runs on a worker thread.
+
+	Args:
+		separation_intensity: Controls vocal emphasis (0.0-1.0):
+			- 0.0: instrumental only (vocals completely removed)
+			- 0.5: balanced (50/50 original + separation)
+			- 1.0: vocals maximized (original mix + vocal enhancement)
 
 	Optimization: Saves output as MP3 (default) instead of WAV for 80% disk savings.
 	"""
@@ -146,6 +152,16 @@ def _separate_stems(model, audio_path: Path, output_dir: Path, on_progress=None)
 	stems = dict(zip(model.sources, sources))
 	vocals = stems["vocals"]
 	accompaniment = sum(audio for name, audio in stems.items() if name != "vocals")
+
+	# Apply separation intensity: blend original audio with separated stems based on intensity
+	# intensity = 0.0 -> pure accompaniment (no vocals)
+	# intensity = 0.5 -> balanced (50% original + 50% separation)
+	# intensity = 1.0 -> vocals maximized (original mix emphasized)
+	if separation_intensity != 0.5:
+		# Clamp intensity to valid range
+		intensity = max(0.0, min(1.0, separation_intensity))
+		# Blend: more intensity = more vocals in final output
+		vocals = vocals * intensity + (waveform - accompaniment) * (1.0 - intensity)
 
 	# Optimization: Save as temporary WAV, then convert to MP3 for compression
 	temp_vocals_wav = output_dir / "vocals_temp.wav"
@@ -215,8 +231,12 @@ def _validate_audio_file(file_path: Path) -> None:
 	name="backend.tasks.process_audio_task",
 	max_retries=2,
 )
-def process_audio_task(self, task_id: str, file_path: str) -> dict[str, Any]:
-	"""Separate one uploaded file into vocals and accompaniment WAV files."""
+def process_audio_task(self, task_id: str, file_path: str, separation_intensity: float = 0.5) -> dict[str, Any]:
+	"""Separate one uploaded file into vocals and accompaniment WAV files.
+
+	Args:
+		separation_intensity: Vocal emphasis (0.0-1.0, default 0.5 for balanced)
+	"""
 	output_dir = OUTPUTS_DIR / task_id
 	try:
 		self.update_state(state="PROCESSING", meta={"progress": 10, "task_id": task_id})
@@ -235,7 +255,7 @@ def process_audio_task(self, task_id: str, file_path: str) -> dict[str, Any]:
 				meta={"progress": 30 + int(60 * fraction), "task_id": task_id},
 			)
 
-		_separate_stems(separator, audio_path, output_dir, on_progress=report)
+		_separate_stems(separator, audio_path, output_dir, separation_intensity=separation_intensity, on_progress=report)
 
 		# Verify output files (check for both WAV and MP3)
 		has_vocals = (output_dir / "vocals.mp3").is_file() or (

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import SeparationLevelSlider from './components/SeparationLevelSlider';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || '';
 const MAX_FILE_SIZE = 500 * 1024 * 1024;
@@ -14,6 +15,7 @@ function App() {
   const [fileName, setFileName] = useState('');
   const [dragActive, setDragActive] = useState(false);
   const [results, setResults] = useState({ vocalsUrl: '', accompanimentUrl: '' });
+  const [separationLevel, setSeparationLevel] = useState(50);
   const inputRef = useRef(null);
   const pollingRef = useRef(null);
 
@@ -51,7 +53,13 @@ function App() {
     poll();
   };
 
-  useEffect(() => () => window.clearTimeout(pollingRef.current), []);
+  useEffect(() => {
+    const savedLevel = localStorage.getItem('separationLevel');
+    if (savedLevel) {
+      setSeparationLevel(parseInt(savedLevel, 10));
+    }
+    return () => window.clearTimeout(pollingRef.current);
+  }, []);
 
   const uploadFile = async (file) => {
     setLoading(true);
@@ -60,6 +68,7 @@ function App() {
     setStatus('UPLOADING');
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('separation_intensity', separationLevel / 100);
 
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
@@ -159,16 +168,28 @@ function App() {
     setProgress(0);
     setFileName('');
     setResults({ vocalsUrl: '', accompanimentUrl: '' });
+    setSeparationLevel(50);
   };
 
   const renderUploadZone = () => (
-    <div className={`rounded-2xl border-2 border-dashed p-8 text-center transition-colors sm:p-14 ${dragActive ? 'border-primary-400 bg-primary-500/10' : 'border-slate-700 bg-slate-900/50'}`} onDragEnter={handleDrag} onDragOver={handleDrag} onDragLeave={handleDrag} onDrop={handleDrop}>
-      <div className="mx-auto mb-5 text-5xl text-primary-300">◉</div>
-      <h2 className="text-xl font-bold">Drop an audio file here</h2>
-      <p className="mt-2 text-sm text-slate-400">MP3, WAV, FLAC, OGG or M4A, up to 500 MB</p>
-      <button type="button" disabled={loading} onClick={() => inputRef.current?.click()} className="mt-7 rounded-xl bg-primary-600 px-6 py-3 font-semibold shadow-lg shadow-primary-950/40 hover:bg-primary-500">Choose audio file</button>
-      <input ref={inputRef} className="hidden" type="file" accept={ALLOWED_EXTENSIONS.join(',')} onChange={handleFileInput} />
-    </div>
+    <>
+      <div className="mb-6">
+        <SeparationLevelSlider
+          value={separationLevel}
+          onChange={(newLevel) => {
+            setSeparationLevel(newLevel);
+            localStorage.setItem('separationLevel', newLevel);
+          }}
+        />
+      </div>
+      <div className={`rounded-2xl border-2 border-dashed p-8 text-center transition-colors sm:p-14 ${dragActive ? 'border-primary-400 bg-primary-500/10' : 'border-slate-700 bg-slate-900/50'}`} onDragEnter={handleDrag} onDragOver={handleDrag} onDragLeave={handleDrag} onDrop={handleDrop}>
+        <div className="mx-auto mb-5 text-5xl text-primary-300">◉</div>
+        <h2 className="text-xl font-bold">Drop an audio file here</h2>
+        <p className="mt-2 text-sm text-slate-400">MP3, WAV, FLAC, OGG or M4A, up to 500 MB</p>
+        <button type="button" disabled={loading} onClick={() => inputRef.current?.click()} className="mt-7 rounded-xl bg-primary-600 px-6 py-3 font-semibold shadow-lg shadow-primary-950/40 hover:bg-primary-500">Choose audio file</button>
+        <input ref={inputRef} className="hidden" type="file" accept={ALLOWED_EXTENSIONS.join(',')} onChange={handleFileInput} />
+      </div>
+    </>
   );
 
   const renderLoadingState = () => (fileName || loading || taskId) && (
@@ -180,7 +201,7 @@ function App() {
 
   const renderSuccessState = () => status === 'SUCCESS' && (
     <div className="mt-6 animate-slide-in-right">
-      <p className="mb-4 text-sm font-semibold text-emerald-300">Gata! Piesa a fost separată — mai jos poți asculta și descărca minusul (fără voce) și vocea izolată.</p>
+      <p className="mb-6 text-sm font-semibold text-emerald-300">Gata! Piesa a fost separată — mai jos poți asculta și descărca minusul (fără voce) și vocea izolată.</p>
       <div className="grid gap-4 sm:grid-cols-2">
         {[
           ['accompaniment', 'Minus (fără voce)', 'Instrumentalul piesei, fără voce — acesta e minusul.', results.accompanimentUrl, true],

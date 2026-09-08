@@ -98,13 +98,20 @@ async def health_check() -> dict[str, str]:
 
 
 @app.post("/api/upload", response_model=UploadResponse, status_code=status.HTTP_202_ACCEPTED)
-async def upload_audio(file: UploadFile = File(...)) -> UploadResponse:
+async def upload_audio(file: UploadFile = File(...), separation_intensity: float = 0.5) -> UploadResponse:
 	filename = Path(file.filename or "").name
 	extension = Path(filename).suffix.lower()
 	if not filename or extension not in ALLOWED_EXTENSIONS:
 		raise HTTPException(
 			status_code=400,
 			detail=f"Unsupported file type. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
+		)
+
+	# Validate separation_intensity is in valid range
+	if not 0.0 <= separation_intensity <= 1.0:
+		raise HTTPException(
+			status_code=400,
+			detail="separation_intensity must be between 0.0 and 1.0",
 		)
 
 	task_id = str(uuid4())
@@ -118,7 +125,7 @@ async def upload_audio(file: UploadFile = File(...)) -> UploadResponse:
 					raise HTTPException(status_code=413, detail="File exceeds the 500 MB limit")
 				output_file.write(chunk)
 		await file.close()
-		process_audio_task.apply_async(args=[task_id, str(destination)], task_id=task_id)
+		process_audio_task.apply_async(args=[task_id, str(destination), separation_intensity], task_id=task_id)
 	except HTTPException:
 		destination.unlink(missing_ok=True)
 		raise
