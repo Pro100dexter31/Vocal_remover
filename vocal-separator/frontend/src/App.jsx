@@ -23,6 +23,7 @@ function App() {
   const [fileSize, setFileSize] = useState(0);
   const [isExporting, setIsExporting] = useState(false);
   const [exportError, setExportError] = useState('');
+  const [normalize, setNormalize] = useState(true);
   const inputRef = useRef(null);
   const pollingRef = useRef(null);
   const abortControllerRef = useRef(new AbortController());
@@ -70,12 +71,17 @@ function App() {
           setSeparationLevel(level);
         }
       }
+      const savedNormalize = localStorage.getItem('normalize');
+      if (savedNormalize) {
+        setNormalize(JSON.parse(savedNormalize));
+      }
       const lastUploadTime = localStorage.getItem('lastUploadTime');
       if (lastUploadTime) {
         const timeDiff = Date.now() - parseInt(lastUploadTime, 10);
         const oneWeek = 7 * 24 * 60 * 60 * 1000;
         if (timeDiff > oneWeek) {
           localStorage.removeItem('separationLevel');
+          localStorage.removeItem('normalize');
         }
       }
     } catch (e) {
@@ -98,6 +104,7 @@ function App() {
     const formData = new FormData();
     formData.append('file', file);
     formData.append('separation_intensity', separationLevel / 100);
+    formData.append('normalize', normalize.toString());
 
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
@@ -314,6 +321,33 @@ function App() {
             }
           }}
         />
+      </div>
+
+      <div className="mb-6 rounded-2xl border border-slate-700 bg-slate-900/70 p-6">
+        <div className="flex items-center gap-3">
+          <input
+            type="checkbox"
+            id="normalize"
+            checked={normalize}
+            onChange={(e) => {
+              setNormalize(e.target.checked);
+              try {
+                localStorage.setItem('normalize', JSON.stringify(e.target.checked));
+              } catch (e) {
+                console.warn('Could not save normalize preference:', e);
+              }
+            }}
+            className="h-5 w-5 rounded border-slate-500 bg-slate-800 text-primary-600 cursor-pointer"
+          />
+          <div className="flex-1">
+            <label htmlFor="normalize" className="font-semibold cursor-pointer">
+              Auto Normalize Volume
+            </label>
+            <p className="text-xs text-slate-400 mt-1">
+              Prevents distortion and ensures consistent loudness
+            </p>
+          </div>
+        </div>
       </div>
       <div className={`rounded-2xl border-2 border-dashed p-8 text-center transition-colors sm:p-14 ${dragActive ? 'border-primary-400 bg-primary-500/10' : 'border-slate-700 bg-slate-900/50'}`} onDragEnter={handleDrag} onDragOver={handleDrag} onDragLeave={handleDrag} onDrop={handleDrop}>
         <div className="mx-auto mb-5 text-5xl text-primary-300">◉</div>

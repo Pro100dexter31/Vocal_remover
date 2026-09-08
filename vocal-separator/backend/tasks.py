@@ -32,6 +32,7 @@ from .config import (
 	RETENTION_HOURS,
 	UPLOADS_DIR,
 )
+from .volume_normalizer import normalize_audio_file, NormalizationError
 
 
 LOGGER = logging.getLogger(__name__)
@@ -225,17 +226,80 @@ def _validate_audio_file(file_path: Path) -> None:
 		raise ValueError(f"Unsupported audio extension: {file_path.suffix}")
 
 
+def _apply_normalization(output_dir: Path) -> None:
+	"""
+	Apply volume normalization to separated stems.
+
+	Normalizes both vocals and accompaniment to -1dB peak level
+	to prevent clipping and ensure consistent loudness.
+
+	Args:
+		output_dir: Directory containing vocal and accompaniment files
+
+	Raises:
+		NormalizationError: If normalization fails
+	"""
+	from pathlib import Path
+
+	# Check which files exist (MP3 or WAV)
+	vocal_files = list(output_dir.glob("vocals.*"))
+	accompaniment_files = list(output_dir.glob("accompaniment.*"))
+
+	if not vocal_files or not accompaniment_files:
+		LOGGER.warning("Could not find stems to normalize")
+		return
+
+	vocal_file = vocal_files[0]
+	accompaniment_file = accompaniment_files[0]
+
+	# Create temporary paths for normalized files
+	vocal_normalized = output_dir / f"{vocal_file.stem}_norm{vocal_file.suffix}"
+	accompaniment_normalized = output_dir / f"{accompaniment_file.stem}_norm{accompaniment_file.suffix}"
+
+	try:
+		# Normalize vocal track
+		normalize_audio_file(
+			vocal_file,
+			vocal_normalized,
+			method="peak",
+			target_peak_dbfs=-1.0
+		)
+
+		# Normalize accompaniment track
+		normalize_audio_file(
+			accompaniment_file,
+			accompaniment_normalized,
+			method="peak",
+			target_peak_dbfs=-1.0
+		)
+
+		# Replace original files with normalized versions
+		vocal_file.unlink()
+		accompaniment_file.unlink()
+		vocal_normalized.rename(vocal_file)
+		accompaniment_normalized.rename(accompaniment_file)
+
+		LOGGER.info("Volume normalization completed for task in %s", output_dir)
+
+	except Exception as e:
+		# Clean up temporary files if normalization failed
+		vocal_normalized.unlink(missing_ok=True)
+		accompaniment_normalized.unlink(missing_ok=True)
+		raise NormalizationError(f"Failed to normalize audio in {output_dir}: {str(e)}")
+
+
 @celery_app.task(
 	bind=True,
 	base=CallbackTask,
 	name="backend.tasks.process_audio_task",
 	max_retries=2,
 )
-def process_audio_task(self, task_id: str, file_path: str, separation_intensity: float = 0.5) -> dict[str, Any]:
+def process_audio_task(self, task_id: str, file_path: str, separation_intensity: float = 0.5, normalize: bool = True) -> dict[str, Any]:
 	"""Separate one uploaded file into vocals and accompaniment WAV files.
 
 	Args:
 		separation_intensity: Vocal emphasis (0.0-1.0, default 0.5 for balanced)
+		normalize: Apply volume normalization after separation (default: True)
 	"""
 	output_dir = OUTPUTS_DIR / task_id
 	try:
@@ -256,6 +320,16 @@ def process_audio_task(self, task_id: str, file_path: str, separation_intensity:
 			)
 
 		_separate_stems(separator, audio_path, output_dir, separation_intensity=separation_intensity, on_progress=report)
+
+		# Apply volume normalization if enabled
+		if normalize:
+			self.update_state(state="PROCESSING", meta={"progress": 92, "task_id": task_id})
+			try:
+				_apply_normalization(output_dir)
+				LOGGER.info("Volume normalization applied to stems")
+			except NormalizationError as e:
+				LOGGER.warning("Volume normalization failed (continuing without it): %s", e)
+				# Continue without normalization rather than failing the entire task
 
 		# Verify output files (check for both WAV and MP3)
 		has_vocals = (output_dir / "vocals.mp3").is_file() or (

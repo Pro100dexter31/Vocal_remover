@@ -8,11 +8,17 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from celery.result import AsyncResult
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel
 
+from .audio_converter import (
+	convert_audio,
+	InvalidFormatError,
+	InvalidBitrateError,
+	AudioConversionError,
+)
 from .config import (
 	ALLOWED_EXTENSIONS,
 	AUDIO_OUTPUT_FORMAT,
@@ -98,7 +104,11 @@ async def health_check() -> dict[str, str]:
 
 
 @app.post("/api/upload", response_model=UploadResponse, status_code=status.HTTP_202_ACCEPTED)
-async def upload_audio(file: UploadFile = File(...), separation_intensity: float = 0.5) -> UploadResponse:
+async def upload_audio(
+	file: UploadFile = File(...),
+	separation_intensity: float = 0.5,
+	normalize: bool = True
+) -> UploadResponse:
 	filename = Path(file.filename or "").name
 	extension = Path(filename).suffix.lower()
 	if not filename or extension not in ALLOWED_EXTENSIONS:
@@ -125,7 +135,7 @@ async def upload_audio(file: UploadFile = File(...), separation_intensity: float
 					raise HTTPException(status_code=413, detail="File exceeds the 500 MB limit")
 				output_file.write(chunk)
 		await file.close()
-		process_audio_task.apply_async(args=[task_id, str(destination), separation_intensity], task_id=task_id)
+		process_audio_task.apply_async(args=[task_id, str(destination), separation_intensity, normalize], task_id=task_id)
 	except HTTPException:
 		destination.unlink(missing_ok=True)
 		raise
@@ -179,3 +189,112 @@ async def download_audio(
 		filename=filename,
 		headers={"Content-Disposition": f'attachment; filename="{filename}"'},
 	)
+
+
+@app.post("/api/export/{task_id}")
+async def export_audio(
+	task_id: str,
+	file_type: Literal["vocals", "accompaniment"],
+	output_format: str = Query(..., regex="^(mp3|flac|ogg|wav)$"),
+	bitrate: str | None = Query(None, regex="^(128k|192k|320k)$"),
+) -> FileResponse:
+	"""
+	Export separated audio in different formats.
+
+	Args:
+		task_id: ID of the processed task
+		file_type: Either "vocals" or "accompaniment"
+		output_format: Target format (mp3, flac, ogg, wav)
+		bitrate: Optional bitrate for lossy formats (128k, 192k, 320k)
+
+	Returns:
+		FileResponse with converted audio file
+
+	Raises:
+		HTTPException 404: If source file not found
+		HTTPException 400: If format/bitrate invalid
+		HTTPException 500: If conversion fails
+	"""
+	try:
+		# Determine source file format
+		source_format = AUDIO_OUTPUT_FORMAT if AUDIO_OUTPUT_FORMAT in ("mp3", "wav") else "wav"
+		source_file = OUTPUTS_DIR / task_id / f"{file_type}.{source_format}"
+
+		# Fallback: check other format if not found
+		if not source_file.exists():
+			alt_format = "wav" if source_format == "mp3" else "mp3"
+			alt_path = OUTPUTS_DIR / task_id / f"{file_type}.{alt_format}"
+			if alt_path.exists():
+				source_file = alt_path
+			else:
+				LOGGER.error("Source file not found for task %s, file_type %s", task_id, file_type)
+				raise HTTPException(status_code=404, detail="Audio file not found")
+
+		# Handle case where source and target are the same format
+		if source_file.suffix.lstrip(".").lower() == output_format.lower():
+			# No conversion needed, return source file directly
+			return FileResponse(
+				path=source_file,
+				media_type=_get_media_type(output_format),
+				filename=f"{file_type}.{output_format}",
+				headers={"Content-Disposition": f'attachment; filename="{file_type}.{output_format}"'},
+			)
+
+		# Perform conversion
+		output_file = OUTPUTS_DIR / task_id / f"{file_type}_converted.{output_format}"
+
+		LOGGER.info(
+			"Converting %s (%s) to %s with bitrate %s",
+			file_type,
+			source_file.suffix,
+			output_format,
+			bitrate or "default",
+		)
+
+		try:
+			convert_audio(
+				input_path=source_file,
+				output_path=output_file,
+				output_format=output_format,
+				bitrate=bitrate,
+			)
+		except (InvalidFormatError, InvalidBitrateError) as e:
+			LOGGER.warning("Invalid format/bitrate: %s", e)
+			raise HTTPException(status_code=400, detail=str(e)) from e
+		except AudioConversionError as e:
+			LOGGER.error("Conversion failed: %s", e)
+			raise HTTPException(status_code=500, detail="Audio conversion failed") from e
+
+		# Verify output file was created
+		if not output_file.exists():
+			LOGGER.error("Output file not created for task %s", task_id)
+			raise HTTPException(status_code=500, detail="Conversion failed - output file not created")
+
+		# Get file size for logging
+		file_size_mb = output_file.stat().st_size / (1024 * 1024)
+		LOGGER.info("✓ Conversion complete: %s (%.2f MB)", output_file.name, file_size_mb)
+
+		# Return converted file
+		return FileResponse(
+			path=output_file,
+			media_type=_get_media_type(output_format),
+			filename=f"{file_type}.{output_format}",
+			headers={"Content-Disposition": f'attachment; filename="{file_type}.{output_format}"'},
+		)
+
+	except HTTPException:
+		raise
+	except Exception as exc:
+		LOGGER.exception("Unexpected error in export_audio: %s", exc)
+		raise HTTPException(status_code=500, detail="Internal server error") from exc
+
+
+def _get_media_type(audio_format: str) -> str:
+	"""Get MIME type for audio format."""
+	media_types = {
+		"mp3": "audio/mpeg",
+		"wav": "audio/wav",
+		"flac": "audio/flac",
+		"ogg": "audio/ogg",
+	}
+	return media_types.get(audio_format.lower(), "application/octet-stream")
