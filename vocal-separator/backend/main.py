@@ -10,7 +10,7 @@ from uuid import uuid4
 from celery.result import AsyncResult
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .audio_converter import (
@@ -298,3 +298,186 @@ def _get_media_type(audio_format: str) -> str:
 		"ogg": "audio/ogg",
 	}
 	return media_types.get(audio_format.lower(), "application/octet-stream")
+
+
+PREVIEW_BUFFER_SIZE = 30 * 1024 * 1024  # 30 MB buffer for first 30 seconds
+CHUNK_SIZE = 64 * 1024  # 64 KB chunks for streaming
+
+
+async def _stream_audio_file(file_path: Path, range_header: str | None = None):
+	"""
+	Stream audio file with optional range request support (HTTP 206).
+
+	Args:
+		file_path: Path to audio file to stream
+		range_header: HTTP Range header value (e.g., "bytes=0-1023")
+
+	Yields:
+		Chunks of file data
+	"""
+	file_size = file_path.stat().st_size
+
+	if range_header:
+		try:
+			range_start, range_end = range_header.replace("bytes=", "").split("-")
+			start = int(range_start) if range_start else 0
+			end = int(range_end) if range_end else file_size - 1
+
+			if start > end or start >= file_size:
+				raise ValueError("Invalid range")
+
+			end = min(end, file_size - 1)
+			length = end - start + 1
+
+			LOGGER.info("Streaming range %d-%d (size: %d)", start, end, length)
+
+			with open(file_path, "rb") as f:
+				f.seek(start)
+				remaining = length
+				while remaining > 0:
+					chunk_len = min(CHUNK_SIZE, remaining)
+					chunk = f.read(chunk_len)
+					if not chunk:
+						break
+					yield chunk
+					remaining -= len(chunk)
+		except (ValueError, IndexError) as e:
+			LOGGER.warning("Invalid range header: %s", e)
+			# Fallback to full file streaming
+			with open(file_path, "rb") as f:
+				while True:
+					chunk = f.read(CHUNK_SIZE)
+					if not chunk:
+						break
+					yield chunk
+	else:
+		# Stream full file
+		with open(file_path, "rb") as f:
+			while True:
+				chunk = f.read(CHUNK_SIZE)
+				if not chunk:
+					break
+				yield chunk
+
+
+@app.get("/api/preview/{task_id}")
+async def preview_audio(
+	task_id: str,
+	file_type: Literal["vocals", "accompaniment", "both"] = "both",
+	request: Request = None,
+) -> StreamingResponse:
+	"""
+	Stream audio preview without full download.
+
+	Supports HTTP range requests for seeking.
+
+	Args:
+		task_id: ID of the processed task
+		file_type: "vocals", "accompaniment", or "both"
+		request: HTTP request object
+
+	Returns:
+		StreamingResponse with audio data
+
+	Raises:
+		HTTPException 404: If audio files not found
+		HTTPException 416: If invalid range request
+	"""
+	try:
+		# Determine source file format
+		source_format = AUDIO_OUTPUT_FORMAT if AUDIO_OUTPUT_FORMAT in ("mp3", "wav") else "wav"
+
+		# Get file paths
+		vocals_path = OUTPUTS_DIR / task_id / f"vocals.{source_format}"
+		accompaniment_path = OUTPUTS_DIR / task_id / f"accompaniment.{source_format}"
+
+		# Fallback: check other format if not found
+		if not vocals_path.exists():
+			alt_format = "wav" if source_format == "mp3" else "mp3"
+			alt_vocals = OUTPUTS_DIR / task_id / f"vocals.{alt_format}"
+			if alt_vocals.exists():
+				vocals_path = alt_vocals
+
+		if not accompaniment_path.exists():
+			alt_format = "wav" if source_format == "mp3" else "mp3"
+			alt_accompaniment = OUTPUTS_DIR / task_id / f"accompaniment.{alt_format}"
+			if alt_accompaniment.exists():
+				accompaniment_path = alt_accompaniment
+
+		# Determine which file(s) to stream
+		if file_type == "vocals":
+			if not vocals_path.exists():
+				raise HTTPException(status_code=404, detail="Vocal track not found")
+			stream_path = vocals_path
+			filename = "vocals"
+		elif file_type == "accompaniment":
+			if not accompaniment_path.exists():
+				raise HTTPException(status_code=404, detail="Accompaniment track not found")
+			stream_path = accompaniment_path
+			filename = "accompaniment"
+		else:  # both
+			if not vocals_path.exists() or not accompaniment_path.exists():
+				raise HTTPException(status_code=404, detail="Audio tracks not found")
+			# For "both", stream the mix (vocals + accompaniment)
+			# Use vocals as primary, as both are available
+			stream_path = vocals_path
+			filename = "preview"
+
+		file_size = stream_path.stat().st_size
+		range_header = request.headers.get("range") if request else None
+		media_type = _get_media_type(stream_path.suffix.lstrip("."))
+
+		# Handle range requests (HTTP 206 Partial Content)
+		if range_header:
+			try:
+				range_start, range_end = range_header.replace("bytes=", "").split("-")
+				start = int(range_start) if range_start else 0
+				end = int(range_end) if range_end else file_size - 1
+
+				if start > end or start >= file_size:
+					raise HTTPException(
+						status_code=416,
+						detail=f"Range not satisfiable. File size: {file_size}"
+					)
+
+				end = min(end, file_size - 1)
+				length = end - start + 1
+
+				LOGGER.info(
+					"Preview range request: %d-%d/%d for %s",
+					start, end, file_size, filename
+				)
+
+				return StreamingResponse(
+					_stream_audio_file(stream_path, range_header),
+					status_code=206,
+					media_type=media_type,
+					headers={
+						"Content-Range": f"bytes {start}-{end}/{file_size}",
+						"Content-Length": str(length),
+						"Accept-Ranges": "bytes",
+						"Content-Disposition": f"inline; filename=\"{filename}.{stream_path.suffix.lstrip('.')}\"",
+					}
+				)
+			except ValueError as e:
+				LOGGER.warning("Invalid range header: %s", e)
+				raise HTTPException(status_code=416, detail="Invalid range request")
+
+		# Full file streaming
+		LOGGER.info("Streaming full preview for %s (%s)", filename, stream_path.name)
+
+		return StreamingResponse(
+			_stream_audio_file(stream_path),
+			media_type=media_type,
+			headers={
+				"Accept-Ranges": "bytes",
+				"Content-Length": str(file_size),
+				"Content-Disposition": f"inline; filename=\"{filename}.{stream_path.suffix.lstrip('.')}\"",
+			}
+		)
+
+	except HTTPException:
+		raise
+	except Exception as e:
+		LOGGER.exception("Preview streaming failed: %s", e)
+		raise HTTPException(status_code=500, detail="Could not stream audio preview")
