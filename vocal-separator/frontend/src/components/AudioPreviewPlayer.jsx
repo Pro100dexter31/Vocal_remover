@@ -6,6 +6,7 @@ function AudioPreviewPlayer({
   onPlayStart = null,  // Callback when playback starts (for Task 4.4)
   onPlayStop = null,   // Callback when playback stops (for Task 4.4)
   isActive = false,    // Is this player the active one (for Task 4.4)
+  previewSpeed = 1.0,  // Speed for preview playback (Task 5.5)
 }) {
   const [previewType, setPreviewType] = useState('both');
   const [isLoading, setIsLoading] = useState(false);
@@ -17,6 +18,7 @@ function AudioPreviewPlayer({
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(1);
   const [error, setError] = useState('');
+  const [displayedSpeed, setDisplayedSpeed] = useState(previewSpeed);
   const audioRef = useRef(null);
   const canvasRef = useRef(null);
   const analyserRef = useRef(null);
@@ -30,6 +32,13 @@ function AudioPreviewPlayer({
     { value: 'accompaniment', label: 'Preview Instrumental', emoji: '🎸' },
     { value: 'both', label: 'Preview Both (Mixed)', emoji: '🎵' },
   ];
+
+  // Apply preview speed to audio element (Task 5.5)
+  useEffect(() => {
+    if (!audioRef.current) return;
+    audioRef.current.playbackRate = previewSpeed;
+    setDisplayedSpeed(previewSpeed);
+  }, [previewSpeed]);
 
   // Setup Web Audio API for waveform visualization
   useEffect(() => {
@@ -340,11 +349,18 @@ function AudioPreviewPlayer({
         )}
       </div>
 
-      {/* Info */}
+      {/* Info & Speed Display */}
       <div className="rounded-lg border border-slate-600 bg-slate-800/50 p-3">
-        <p className="text-xs text-slate-400">
-          <span className="font-semibold">💡 Tip:</span> Only one preview can play at a time. Select different buttons to switch preview types.
-        </p>
+        <div className="flex items-center justify-between">
+          <p className="text-xs text-slate-400">
+            <span className="font-semibold">💡 Tip:</span> Only one preview can play at a time. Select different buttons to switch preview types.
+          </p>
+          {displayedSpeed !== 1.0 && (
+            <div className="flex items-center gap-1 rounded-full bg-primary-500/20 px-2 py-1">
+              <span className="text-xs font-semibold text-primary-300">{displayedSpeed}x</span>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

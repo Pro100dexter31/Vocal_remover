@@ -33,6 +33,22 @@ function App() {
   const pollingRef = useRef(null);
   const abortControllerRef = useRef(new AbortController());
 
+  // Load settings from localStorage on mount (Task 5.6)
+  useEffect(() => {
+    try {
+      const savedSeparationLevel = localStorage.getItem('separationLevel');
+      if (savedSeparationLevel) setSeparationLevel(parseInt(savedSeparationLevel));
+
+      const savedNormalize = localStorage.getItem('normalize');
+      if (savedNormalize) setNormalize(JSON.parse(savedNormalize));
+
+      const savedSpeed = localStorage.getItem('speed');
+      if (savedSpeed) setSpeed(parseFloat(savedSpeed));
+    } catch (e) {
+      console.warn('Could not load settings from localStorage:', e);
+    }
+  }, []);
+
   const checkStatus = async (currentTaskId) => {
     const response = await fetch(`${API_BASE_URL}/api/status/${currentTaskId}`);
     if (!response.ok) throw new Error('Could not read processing status.');
@@ -375,7 +391,7 @@ function App() {
     <div className="mt-6 animate-slide-in-right">
       <p className="mb-6 text-sm font-semibold text-emerald-300">Gata! Piesa a fost separată — mai jos poți asculta și descărca minusul (fără voce) și vocea izolată.</p>
 
-      {/* Preview Player - Task 4.3 & 4.4 */}
+      {/* Preview Player - Task 4.3 & 4.4 & 5.5 */}
       <div className="mb-6">
         <AudioPreviewPlayer
           taskId={taskId}
@@ -383,6 +399,7 @@ function App() {
           isActive={activePreviewPlayer === taskId}
           onPlayStart={() => setActivePreviewPlayer(taskId)}
           onPlayStop={() => setActivePreviewPlayer(null)}
+          previewSpeed={speed}
         />
       </div>
 
