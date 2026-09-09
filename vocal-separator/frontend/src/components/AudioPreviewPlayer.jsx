@@ -9,12 +9,17 @@ function AudioPreviewPlayer({
 }) {
   const [previewType, setPreviewType] = useState('both');
   const [isLoading, setIsLoading] = useState(false);
+  const [isBuffering, setIsBuffering] = useState(false);
+  const [previewLoaded, setPreviewLoaded] = useState(false);
+  const [connectionInterrupted, setConnectionInterrupted] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(1);
   const [error, setError] = useState('');
   const audioRef = useRef(null);
+  const canvasRef = useRef(null);
+  const analyserRef = useRef(null);
 
   if (!taskId) {
     return null;
@@ -26,6 +31,68 @@ function AudioPreviewPlayer({
     { value: 'both', label: 'Preview Both (Mixed)', emoji: '🎵' },
   ];
 
+  // Setup Web Audio API for waveform visualization
+  useEffect(() => {
+    if (!audioRef.current || !canvasRef.current || !isActive) return;
+
+    try {
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 256;
+
+      const source = audioContext.createMediaElementAudioSource(audioRef.current);
+      source.connect(analyser);
+      analyser.connect(audioContext.destination);
+
+      analyserRef.current = analyser;
+    } catch (e) {
+      console.warn('Web Audio API not available:', e);
+    }
+  }, [isActive]);
+
+  // Draw waveform visualization
+  const drawWaveform = () => {
+    if (!canvasRef.current || !analyserRef.current) return;
+
+    const canvas = canvasRef.current;
+    const analyser = analyserRef.current;
+    const ctx = canvas.getContext('2d');
+
+    const bufferLength = analyser.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
+    analyser.getByteFrequencyData(dataArray);
+
+    ctx.fillStyle = 'rgb(15, 23, 42)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgb(59, 130, 246)';
+    ctx.beginPath();
+
+    const sliceWidth = canvas.width / bufferLength;
+    let x = 0;
+
+    for (let i = 0; i < bufferLength; i++) {
+      const v = dataArray[i] / 128.0;
+      const y = (v * canvas.height) / 2;
+
+      if (i === 0) {
+        ctx.moveTo(x, y);
+      } else {
+        ctx.lineTo(x, y);
+      }
+
+      x += sliceWidth;
+    }
+
+    ctx.lineTo(canvas.width, canvas.height / 2);
+    ctx.stroke();
+
+    if (isPlaying) {
+      requestAnimationFrame(drawWaveform);
+    }
+  };
+
   // Handle changes in preview type
   const handlePreviewTypeChange = (type) => {
     if (audioRef.current) {
@@ -34,11 +101,13 @@ function AudioPreviewPlayer({
       if (onPlayStop) onPlayStop();
     }
     setPreviewType(type);
+    setPreviewLoaded(false);
+    setConnectionInterrupted(false);
   };
 
   // Handle play/pause
   const handlePlayPause = () => {
-    if (!audioRef.current) return;
+    if (!audioRef.current || isLoading) return;
 
     if (isPlaying) {
       audioRef.current.pause();
@@ -48,11 +117,14 @@ function AudioPreviewPlayer({
       // Notify parent that this player is starting playback
       if (onPlayStart) onPlayStart();
 
+      setIsBuffering(true);
       audioRef.current.play().catch((err) => {
         console.error('Playback error:', err);
         setError('Could not start playback');
+        setIsBuffering(false);
       });
       setIsPlaying(true);
+      drawWaveform();
     }
   };
 
@@ -106,12 +178,19 @@ function AudioPreviewPlayer({
           <button
             key={option.value}
             onClick={() => handlePreviewTypeChange(option.value)}
+            disabled={isLoading || isBuffering}
             className={`w-full rounded-lg px-4 py-3 text-sm font-medium transition-all ${
-              previewType === option.value
-                ? 'border-primary-400 bg-primary-500/20 text-primary-200 ring-2 ring-primary-500/50'
-                : 'border border-slate-600 bg-slate-800 text-slate-300 hover:border-slate-500 hover:bg-slate-700'
+              isLoading || isBuffering
+                ? 'cursor-not-allowed border border-slate-700 bg-slate-800/50 text-slate-500 opacity-50'
+                : previewType === option.value
+                  ? 'border-primary-400 bg-primary-500/20 text-primary-200 ring-2 ring-primary-500/50'
+                  : 'border border-slate-600 bg-slate-800 text-slate-300 hover:border-slate-500 hover:bg-slate-700'
             }`}
-            title={option.label}
+            title={
+              isLoading || isBuffering
+                ? 'Wait for preview to load...'
+                : option.label
+            }
           >
             <span className="mr-2">{option.emoji}</span>
             {option.label}
@@ -125,13 +204,31 @@ function AudioPreviewPlayer({
         <audio
           ref={audioRef}
           src={previewUrl}
-          onLoadedMetadata={(e) => {
-            setDuration(e.target.duration);
+          onLoadStart={() => {
+            setIsLoading(true);
+            setIsBuffering(true);
+            setConnectionInterrupted(false);
             setError('');
           }}
-          onPlay={() => setIsPlaying(true)}
-          onPause={() => setIsPlaying(false)}
+          onLoadedMetadata={(e) => {
+            setDuration(e.target.duration);
+            setPreviewLoaded(true);
+            setError('');
+          }}
+          onCanPlay={() => {
+            setIsBuffering(false);
+            setIsLoading(false);
+          }}
+          onPlay={() => {
+            setIsPlaying(true);
+            drawWaveform();
+          }}
+          onPause={() => {
+            setIsPlaying(false);
+          }}
           onTimeUpdate={(e) => setCurrentTime(e.target.currentTime)}
+          onWaiting={() => setIsBuffering(true)}
+          onPlaying={() => setIsBuffering(false)}
           onEnded={() => {
             setIsPlaying(false);
             if (onPlayStop) onPlayStop();
@@ -139,26 +236,56 @@ function AudioPreviewPlayer({
           onError={(e) => {
             setError('Could not load audio preview');
             setIsPlaying(false);
+            setIsLoading(false);
+            setConnectionInterrupted(true);
           }}
           crossOrigin="anonymous"
         />
+
+        {/* Waveform Visualization (Task 4.5) */}
+        <div className="mb-4 rounded-lg border border-slate-600 bg-slate-950 p-2">
+          <canvas
+            ref={canvasRef}
+            width={300}
+            height={60}
+            className="w-full rounded"
+          />
+          <div className="mt-2 text-center text-xs text-slate-400">
+            {isLoading && <span className="text-yellow-400">⏳ Loading preview...</span>}
+            {previewLoaded && !isLoading && !connectionInterrupted && (
+              <span className="text-green-400">✓ Preview loaded</span>
+            )}
+            {connectionInterrupted && (
+              <span className="text-red-400">⚠ Stream interrupted</span>
+            )}
+            {isBuffering && isPlaying && (
+              <span className="text-yellow-400">🔄 Buffering...</span>
+            )}
+          </div>
+        </div>
 
         {/* Controls */}
         <div className="mb-4 flex items-center justify-between gap-4">
           {/* Play/Pause Button */}
           <button
             onClick={handlePlayPause}
-            disabled={isLoading || !isActive}
+            disabled={isLoading || !isActive || isBuffering}
             className={`flex h-12 w-12 items-center justify-center rounded-full text-lg font-bold transition-all ${
-              isActive
+              isActive && !isLoading
                 ? isPlaying
                   ? 'bg-primary-600 text-white hover:bg-primary-500'
                   : 'bg-primary-600 text-white hover:bg-primary-500'
                 : 'cursor-not-allowed bg-slate-700 text-slate-500 opacity-50'
             }`}
-            title={isActive ? 'Play/Pause' : 'Select this preview to play'}
+            title={
+              isLoading || isBuffering
+                ? 'Still buffering...'
+                : isActive
+                  ? 'Play/Pause'
+                  : 'Select this preview to play'
+            }
           >
-            {isLoading ? (
+            {isLoading || isBuffering ? (
               <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-white" />
             ) : isPlaying ? (
               '⏸'
