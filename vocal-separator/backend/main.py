@@ -107,7 +107,8 @@ async def health_check() -> dict[str, str]:
 async def upload_audio(
 	file: UploadFile = File(...),
 	separation_intensity: float = 0.5,
-	normalize: bool = True
+	normalize: bool = True,
+	speed: float = 1.0,
 ) -> UploadResponse:
 	filename = Path(file.filename or "").name
 	extension = Path(filename).suffix.lower()
@@ -124,6 +125,14 @@ async def upload_audio(
 			detail="separation_intensity must be between 0.0 and 1.0",
 		)
 
+	# Validate speed is in valid range
+	supported_speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+	if speed not in supported_speeds:
+		raise HTTPException(
+			status_code=400,
+			detail=f"Speed must be one of: {', '.join(f'{s}x' for s in supported_speeds)}",
+		)
+
 	task_id = str(uuid4())
 	destination = UPLOADS_DIR / f"{task_id}_{filename}"
 	total_size = 0
@@ -135,7 +144,7 @@ async def upload_audio(
 					raise HTTPException(status_code=413, detail="File exceeds the 500 MB limit")
 				output_file.write(chunk)
 		await file.close()
-		process_audio_task.apply_async(args=[task_id, str(destination), separation_intensity, normalize], task_id=task_id)
+		process_audio_task.apply_async(args=[task_id, str(destination), separation_intensity, normalize, speed], task_id=task_id)
 	except HTTPException:
 		destination.unlink(missing_ok=True)
 		raise

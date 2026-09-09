@@ -33,6 +33,8 @@ from .config import (
 	UPLOADS_DIR,
 )
 from .volume_normalizer import normalize_audio_file, NormalizationError
+from .speed_adjuster import adjust_speed, InvalidSpeedError, SpeedProcessingError
+from .speed_cache import SpeedCache
 
 
 LOGGER = logging.getLogger(__name__)
@@ -60,6 +62,16 @@ celery_app.conf.update(
 
 _separator = None
 _separator_last_used = None
+_speed_cache = None
+
+
+def get_speed_cache() -> SpeedCache:
+	"""Get or create the speed adjustment cache."""
+	global _speed_cache
+	if _speed_cache is None:
+		cache_dir = OUTPUTS_DIR / ".speed_cache"
+		_speed_cache = SpeedCache(cache_dir)
+	return _speed_cache
 
 
 def get_or_create_separator():
@@ -226,6 +238,72 @@ def _validate_audio_file(file_path: Path) -> None:
 		raise ValueError(f"Unsupported audio extension: {file_path.suffix}")
 
 
+def _apply_speed_adjustment(output_dir: Path, speed: float) -> None:
+	"""
+	Apply speed adjustment to separated stems (pitch-invariant time-stretching).
+
+	Args:
+		output_dir: Directory containing vocal and accompaniment files
+		speed: Speed factor (0.5-2.0)
+
+	Raises:
+		SpeedProcessingError: If speed adjustment fails
+	"""
+	if speed == 1.0:
+		LOGGER.info("Speed 1.0x (no adjustment needed)")
+		return
+
+	# Get cache
+	cache = get_speed_cache()
+
+	# Check which files exist (MP3 or WAV)
+	vocal_files = list(output_dir.glob("vocals.*"))
+	accompaniment_files = list(output_dir.glob("accompaniment.*"))
+
+	if not vocal_files or not accompaniment_files:
+		LOGGER.warning("Could not find stems to adjust speed")
+		return
+
+	vocal_file = vocal_files[0]
+	accompaniment_file = accompaniment_files[0]
+
+	try:
+		# Check cache for vocal file
+		cached_vocal = cache.get_cached_file(vocal_file, speed, "vocals")
+		if cached_vocal:
+			vocal_file.unlink()
+			import shutil
+			shutil.copy2(cached_vocal, vocal_file)
+		else:
+			# Adjust vocal speed
+			vocal_output = output_dir / f"{vocal_file.stem}_adjusted{vocal_file.suffix}"
+			adjust_speed(vocal_file, vocal_output, speed)
+			vocal_file.unlink()
+			vocal_output.rename(vocal_file)
+			# Cache result
+			cache.cache_file(vocal_file, speed, "vocals", vocal_file, {})
+
+		# Check cache for accompaniment file
+		cached_accompaniment = cache.get_cached_file(accompaniment_file, speed, "accompaniment")
+		if cached_accompaniment:
+			accompaniment_file.unlink()
+			import shutil
+			shutil.copy2(cached_accompaniment, accompaniment_file)
+		else:
+			# Adjust accompaniment speed
+			accompaniment_output = output_dir / f"{accompaniment_file.stem}_adjusted{accompaniment_file.suffix}"
+			adjust_speed(accompaniment_file, accompaniment_output, speed)
+			accompaniment_file.unlink()
+			accompaniment_output.rename(accompaniment_file)
+			# Cache result
+			cache.cache_file(accompaniment_file, speed, "accompaniment", accompaniment_file, {})
+
+		LOGGER.info("Speed adjustment completed for task in %s (speed: %sx)", output_dir, speed)
+
+	except Exception as e:
+		raise SpeedProcessingError(f"Failed to adjust speed in {output_dir}: {str(e)}")
+
+
 def _apply_normalization(output_dir: Path) -> None:
 	"""
 	Apply volume normalization to separated stems.
@@ -294,12 +372,13 @@ def _apply_normalization(output_dir: Path) -> None:
 	name="backend.tasks.process_audio_task",
 	max_retries=2,
 )
-def process_audio_task(self, task_id: str, file_path: str, separation_intensity: float = 0.5, normalize: bool = True) -> dict[str, Any]:
+def process_audio_task(self, task_id: str, file_path: str, separation_intensity: float = 0.5, normalize: bool = True, speed: float = 1.0) -> dict[str, Any]:
 	"""Separate one uploaded file into vocals and accompaniment WAV files.
 
 	Args:
 		separation_intensity: Vocal emphasis (0.0-1.0, default 0.5 for balanced)
 		normalize: Apply volume normalization after separation (default: True)
+		speed: Speed adjustment factor (0.5-2.0, default 1.0 for no change)
 	"""
 	output_dir = OUTPUTS_DIR / task_id
 	try:
@@ -330,6 +409,16 @@ def process_audio_task(self, task_id: str, file_path: str, separation_intensity:
 			except NormalizationError as e:
 				LOGGER.warning("Volume normalization failed (continuing without it): %s", e)
 				# Continue without normalization rather than failing the entire task
+
+		# Apply speed adjustment if not 1.0x
+		if speed != 1.0:
+			self.update_state(state="PROCESSING", meta={"progress": 93, "task_id": task_id})
+			try:
+				_apply_speed_adjustment(output_dir, speed)
+				LOGGER.info("Speed adjustment applied to stems (speed: %sx)", speed)
+			except (InvalidSpeedError, SpeedProcessingError) as e:
+				LOGGER.warning("Speed adjustment failed (continuing without it): %s", e)
+				# Continue without speed adjustment rather than failing the entire task
 
 		# Verify output files (check for both WAV and MP3)
 		has_vocals = (output_dir / "vocals.mp3").is_file() or (
