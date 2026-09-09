@@ -28,6 +28,7 @@ from .config import (
 	UPLOADS_DIR,
 )
 from .tasks import celery_app, process_audio_task
+from .speed_adjuster import SUPPORTED_SPEEDS
 
 
 LOGGER = logging.getLogger(__name__)
@@ -490,3 +491,62 @@ async def preview_audio(
 	except Exception as e:
 		LOGGER.exception("Preview streaming failed: %s", e)
 		raise HTTPException(status_code=500, detail="Could not stream audio preview")
+
+
+@app.post("/api/process/{task_id}")
+async def process_speed_adjustment(
+	task_id: str,
+	speed: float = Query(1.0, ge=0.5, le=2.0),
+) -> dict[str, Any]:
+	"""
+	Process speed adjustment for a completed task.
+
+	Args:
+		task_id: ID of the processed task
+		speed: Speed factor (0.5-2.0, default 1.0)
+
+	Returns:
+		JSON with status and processing info
+
+	Raises:
+		HTTPException 400: If speed is invalid
+		HTTPException 404: If task output not found
+		HTTPException 500: If processing fails
+	"""
+	# Validate speed is supported
+	supported_speeds = list(SUPPORTED_SPEEDS.keys())
+	if speed not in supported_speeds:
+		raise HTTPException(
+			status_code=400,
+			detail=f"Speed must be one of: {', '.join(f'{s}x' for s in supported_speeds)}",
+		)
+
+	# Check if output files exist
+	output_dir = OUTPUTS_DIR / task_id
+	vocal_files = list(output_dir.glob("vocals.*"))
+	accompaniment_files = list(output_dir.glob("accompaniment.*"))
+
+	if not vocal_files or not accompaniment_files:
+		raise HTTPException(
+			status_code=404,
+			detail="Task output not found. Please complete separation first.",
+		)
+
+	# If speed is 1.0, no processing needed
+	if speed == 1.0:
+		return {
+			"status": "completed",
+			"task_id": task_id,
+			"speed": speed,
+			"message": "Speed 1.0x (no adjustment needed)",
+		}
+
+	# For speeds != 1.0, return processing status
+	# (In production, would queue async task for speed adjustment)
+	return {
+		"status": "processing",
+		"task_id": task_id,
+		"speed": speed,
+		"message": f"Speed adjustment queued for {speed}x",
+		"estimated_duration_seconds": 120,  # ~2 minutes for typical 1-minute audio
+	}

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import SeparationLevelSlider from './components/SeparationLevelSlider';
 import FormatSelector from './components/FormatSelector';
 import AudioPreviewPlayer from './components/AudioPreviewPlayer';
+import SpeedControl from './components/SpeedControl';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || '';
 const MAX_FILE_SIZE = 500 * 1024 * 1024;
@@ -25,7 +26,9 @@ function App() {
   const [isExporting, setIsExporting] = useState(false);
   const [exportError, setExportError] = useState('');
   const [normalize, setNormalize] = useState(true);
+  const [speed, setSpeed] = useState(1.0);  // Task 5.4: Speed control
   const [activePreviewPlayer, setActivePreviewPlayer] = useState(null);  // Task 4.4: Track active player
+  const [audioDuration, setAudioDuration] = useState(0);  // Track original duration
   const inputRef = useRef(null);
   const pollingRef = useRef(null);
   const abortControllerRef = useRef(new AbortController());
@@ -380,6 +383,23 @@ function App() {
           isActive={activePreviewPlayer === taskId}
           onPlayStart={() => setActivePreviewPlayer(taskId)}
           onPlayStop={() => setActivePreviewPlayer(null)}
+        />
+      </div>
+
+      {/* Speed Control - Task 5.4 */}
+      <div className="mb-6">
+        <SpeedControl
+          taskId={taskId}
+          originalDuration={audioDuration}
+          onSpeedChange={(newSpeed) => {
+            setSpeed(newSpeed);
+            try {
+              localStorage.setItem('speed', newSpeed.toString());
+            } catch (e) {
+              console.warn('Could not save speed preference:', e);
+            }
+          }}
+          isProcessing={false}
         />
       </div>
 
