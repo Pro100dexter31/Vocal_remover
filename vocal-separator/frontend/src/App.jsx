@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import SeparationLevelSlider from './components/SeparationLevelSlider';
 import FormatSelector from './components/FormatSelector';
+import AudioPreviewPlayer from './components/AudioPreviewPlayer';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || '';
 const MAX_FILE_SIZE = 500 * 1024 * 1024;
@@ -24,6 +25,7 @@ function App() {
   const [isExporting, setIsExporting] = useState(false);
   const [exportError, setExportError] = useState('');
   const [normalize, setNormalize] = useState(true);
+  const [activePreviewPlayer, setActivePreviewPlayer] = useState(null);  // Task 4.4: Track active player
   const inputRef = useRef(null);
   const pollingRef = useRef(null);
   const abortControllerRef = useRef(new AbortController());
@@ -369,6 +371,17 @@ function App() {
   const renderSuccessState = () => status === 'SUCCESS' && (
     <div className="mt-6 animate-slide-in-right">
       <p className="mb-6 text-sm font-semibold text-emerald-300">Gata! Piesa a fost separată — mai jos poți asculta și descărca minusul (fără voce) și vocea izolată.</p>
+
+      {/* Preview Player - Task 4.3 & 4.4 */}
+      <div className="mb-6">
+        <AudioPreviewPlayer
+          taskId={taskId}
+          apiBaseUrl={API_BASE_URL}
+          isActive={activePreviewPlayer === taskId}
+          onPlayStart={() => setActivePreviewPlayer(taskId)}
+          onPlayStop={() => setActivePreviewPlayer(null)}
+        />
+      </div>
 
       <div className="mb-6">
         <FormatSelector

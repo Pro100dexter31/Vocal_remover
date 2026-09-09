@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 
-function AudioPreviewPlayer({ taskId, apiBaseUrl = '' }) {
+function AudioPreviewPlayer({
+  taskId,
+  apiBaseUrl = '',
+  onPlayStart = null,  // Callback when playback starts (for Task 4.4)
+  onPlayStop = null,   // Callback when playback stops (for Task 4.4)
+  isActive = false,    // Is this player the active one (for Task 4.4)
+}) {
   const [previewType, setPreviewType] = useState('both');
   const [isLoading, setIsLoading] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -15,30 +21,42 @@ function AudioPreviewPlayer({ taskId, apiBaseUrl = '' }) {
   }
 
   const previewOptions = [
-    { value: 'vocals', label: '🎤 Vocals Only', icon: '🎤' },
-    { value: 'accompaniment', label: '🎸 Instrumental Only', icon: '🎸' },
-    { value: 'both', label: '🎵 Both', icon: '🎵' },
+    { value: 'vocals', label: 'Preview Vocals', emoji: '🎤' },
+    { value: 'accompaniment', label: 'Preview Instrumental', emoji: '🎸' },
+    { value: 'both', label: 'Preview Both (Mixed)', emoji: '🎵' },
   ];
 
+  // Handle changes in preview type
   const handlePreviewTypeChange = (type) => {
-    setPreviewType(type);
     if (audioRef.current) {
       audioRef.current.pause();
       setIsPlaying(false);
+      if (onPlayStop) onPlayStop();
     }
+    setPreviewType(type);
   };
 
+  // Handle play/pause
   const handlePlayPause = () => {
-    if (audioRef.current) {
-      if (isPlaying) {
-        audioRef.current.pause();
-      } else {
-        audioRef.current.play();
-      }
-      setIsPlaying(!isPlaying);
+    if (!audioRef.current) return;
+
+    if (isPlaying) {
+      audioRef.current.pause();
+      setIsPlaying(false);
+      if (onPlayStop) onPlayStop();
+    } else {
+      // Notify parent that this player is starting playback
+      if (onPlayStart) onPlayStart();
+
+      audioRef.current.play().catch((err) => {
+        console.error('Playback error:', err);
+        setError('Could not start playback');
+      });
+      setIsPlaying(true);
     }
   };
 
+  // Handle seeking
   const handleTimeChange = (e) => {
     const time = parseFloat(e.target.value);
     if (audioRef.current) {
@@ -47,6 +65,7 @@ function AudioPreviewPlayer({ taskId, apiBaseUrl = '' }) {
     }
   };
 
+  // Handle volume change
   const handleVolumeChange = (e) => {
     const vol = parseFloat(e.target.value);
     if (audioRef.current) {
@@ -55,6 +74,7 @@ function AudioPreviewPlayer({ taskId, apiBaseUrl = '' }) {
     setVolume(vol);
   };
 
+  // Format time display
   const formatTime = (seconds) => {
     if (!seconds || isNaN(seconds)) return '0:00';
     const mins = Math.floor(seconds / 60);
@@ -65,29 +85,41 @@ function AudioPreviewPlayer({ taskId, apiBaseUrl = '' }) {
   const previewUrl = `${apiBaseUrl}/api/preview/${taskId}?file_type=${previewType}`;
 
   return (
-    <div className="rounded-2xl border border-slate-700 bg-slate-900/70 p-6">
-      <h3 className="mb-4 text-lg font-semibold">Preview Audio</h3>
+    <div className={`rounded-2xl border p-6 transition-all ${
+      isActive && isPlaying
+        ? 'border-primary-400 bg-primary-500/10 shadow-lg shadow-primary-500/20'
+        : 'border-slate-700 bg-slate-900/70'
+    }`}>
+      <div className="mb-4 flex items-center justify-between">
+        <h3 className="text-lg font-semibold">Preview Audio</h3>
+        {isActive && isPlaying && (
+          <div className="flex items-center gap-2">
+            <div className="h-2 w-2 animate-pulse rounded-full bg-primary-500" />
+            <span className="text-xs font-semibold text-primary-300">Now Playing</span>
+          </div>
+        )}
+      </div>
 
-      {/* Preview Type Selector */}
-      <div className="mb-6 grid grid-cols-3 gap-3">
+      {/* Preview Type Selector (3 Buttons - Task 4.3) */}
+      <div className="mb-6 space-y-2">
         {previewOptions.map((option) => (
           <button
             key={option.value}
             onClick={() => handlePreviewTypeChange(option.value)}
-            className={`rounded-lg px-3 py-3 text-sm font-medium transition-all ${
+            className={`w-full rounded-lg px-4 py-3 text-sm font-medium transition-all ${
               previewType === option.value
                 ? 'border-primary-400 bg-primary-500/20 text-primary-200 ring-2 ring-primary-500/50'
                 : 'border border-slate-600 bg-slate-800 text-slate-300 hover:border-slate-500 hover:bg-slate-700'
             }`}
             title={option.label}
           >
-            <span className="mr-1">{option.icon}</span>
-            {option.value === 'both' ? 'Both' : option.value === 'vocals' ? 'Vocals' : 'Instrumental'}
+            <span className="mr-2">{option.emoji}</span>
+            {option.label}
           </button>
         ))}
       </div>
 
-      {/* Audio Player */}
+      {/* Audio Player - Task 4.3 */}
       <div className="mb-6 rounded-lg border border-slate-600 bg-slate-800/50 p-4">
         {/* Hidden Audio Element */}
         <audio
@@ -100,6 +132,10 @@ function AudioPreviewPlayer({ taskId, apiBaseUrl = '' }) {
           onPlay={() => setIsPlaying(true)}
           onPause={() => setIsPlaying(false)}
           onTimeUpdate={(e) => setCurrentTime(e.target.currentTime)}
+          onEnded={() => {
+            setIsPlaying(false);
+            if (onPlayStop) onPlayStop();
+          }}
           onError={(e) => {
             setError('Could not load audio preview');
             setIsPlaying(false);
@@ -112,12 +148,15 @@ function AudioPreviewPlayer({ taskId, apiBaseUrl = '' }) {
           {/* Play/Pause Button */}
           <button
             onClick={handlePlayPause}
-            disabled={isLoading}
-            className={`flex h-12 w-12 items-center justify-center rounded-full transition-all ${
-              isPlaying
-                ? 'bg-primary-600 text-white hover:bg-primary-500'
-                : 'bg-primary-600 text-white hover:bg-primary-500'
-            } ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+            disabled={isLoading || !isActive}
+            className={`flex h-12 w-12 items-center justify-center rounded-full text-lg font-bold transition-all ${
+              isActive
+                ? isPlaying
+                  ? 'bg-primary-600 text-white hover:bg-primary-500'
+                  : 'bg-primary-600 text-white hover:bg-primary-500'
+                : 'cursor-not-allowed bg-slate-700 text-slate-500 opacity-50'
+            }`}
+            title={isActive ? 'Play/Pause' : 'Select this preview to play'}
           >
             {isLoading ? (
               <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-white" />
@@ -144,6 +183,7 @@ function AudioPreviewPlayer({ taskId, apiBaseUrl = '' }) {
               value={volume}
               onChange={handleVolumeChange}
               className="w-20 cursor-pointer"
+              disabled={!isActive}
             />
           </div>
         </div>
@@ -157,6 +197,7 @@ function AudioPreviewPlayer({ taskId, apiBaseUrl = '' }) {
             value={currentTime}
             onChange={handleTimeChange}
             className="w-full cursor-pointer"
+            disabled={!isActive}
           />
         </div>
 
@@ -164,15 +205,18 @@ function AudioPreviewPlayer({ taskId, apiBaseUrl = '' }) {
         {error && (
           <p className="text-xs text-red-400">{error}</p>
         )}
-        {isPlaying && !error && (
+        {isPlaying && !error && isActive && (
           <p className="text-xs text-green-400">▶ Playing {previewType}...</p>
+        )}
+        {!isActive && (
+          <p className="text-xs text-slate-500">Click play to activate this preview</p>
         )}
       </div>
 
       {/* Info */}
       <div className="rounded-lg border border-slate-600 bg-slate-800/50 p-3">
         <p className="text-xs text-slate-400">
-          <span className="font-semibold">💡 Tip:</span> Switch between Vocals, Instrumental, and Both to preview different versions before downloading.
+          <span className="font-semibold">💡 Tip:</span> Only one preview can play at a time. Select different buttons to switch preview types.
         </p>
       </div>
     </div>

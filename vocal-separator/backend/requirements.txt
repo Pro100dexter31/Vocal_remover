@@ -34,3 +34,12 @@ python-dotenv==1.0.0
 
 # Audio format conversion for MP3 compression (optimization)
 pydub==0.25.1
+
+# Audio analysis and processing (for audio feature extraction and conversion)
+librosa==0.10.0
+
+# Scientific computing (required by librosa for audio processing)
+scipy==1.11.4
+
+# FFmpeg wrapper for advanced audio operations (optional but recommended)
+ffmpeg-python==0.2.1
