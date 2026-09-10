@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 
 import numpy as np
+import soundfile as sf
 
 LOGGER = logging.getLogger(__name__)
 
@@ -44,6 +45,57 @@ def generate_waveform_peaks(audio: np.ndarray, num_points: int = DEFAULT_NUM_POI
 		peaks.append(round(min(rms, 1.0), 4))
 
 	return peaks
+
+
+def generate_waveform_peaks_streaming(audio_path: Path, num_points: int = DEFAULT_NUM_POINTS) -> list[float]:
+	"""
+	Generate waveform peaks by streaming audio chunks, avoiding full file load to RAM.
+	Optimized for memory efficiency: processes audio in 1MB chunks.
+
+	Args:
+		audio_path: Path to audio file (MP3, WAV, FLAC, etc.)
+		num_points: Number of output points
+
+	Returns:
+		List of RMS values (0.0-1.0 range) with length == num_points
+	"""
+	try:
+		with sf.SoundFile(str(audio_path)) as f:
+			sr = f.samplerate
+			total_frames = len(f)
+
+			if total_frames == 0:
+				return [0.0] * num_points
+
+			chunk_size = max(sr // 10, total_frames // num_points)
+			peaks: list[float] = []
+			chunk_idx = 0
+
+			for i in range(num_points):
+				start_frame = i * chunk_size
+				end_frame = min((i + 1) * chunk_size, total_frames)
+
+				if start_frame >= total_frames:
+					peaks.append(0.0)
+					continue
+
+				chunk = f.read(end_frame - start_frame)
+				if len(chunk) == 0:
+					peaks.append(0.0)
+					continue
+
+				if chunk.ndim > 1:
+					chunk = chunk.mean(axis=1)
+
+				rms = float(np.sqrt(np.mean(np.square(chunk))))
+				peaks.append(round(min(rms, 1.0), 4))
+
+		LOGGER.info("Waveform peaks generated via streaming (memory-efficient)")
+		return peaks
+
+	except Exception as e:
+		LOGGER.error("Failed to generate waveform peaks via streaming: %s", e)
+		return [0.0] * num_points
 
 
 def save_waveform_data(output_dir: Path, waveforms: dict[str, list[float]]) -> Path:

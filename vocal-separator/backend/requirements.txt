@@ -47,3 +47,6 @@ ffmpeg-python==0.2.0
 # YouTube audio extraction (Feature 7) - updated frequently to keep up with
 # YouTube's internal changes; bump this if extraction starts failing.
 yt-dlp==2026.8.19
+
+# Memory profiling for optimization monitoring (Phase 2)
+psutil==6.0.0

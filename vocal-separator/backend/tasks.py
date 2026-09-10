@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import psutil
 from celery import Celery, Task
 
 from .config import (
@@ -39,7 +40,7 @@ from .volume_normalizer import normalize_audio_file, NormalizationError
 from .speed_adjuster import adjust_speed, InvalidSpeedError, SpeedProcessingError
 from .speed_cache import SpeedCache
 from .pitch_shifter import adjust_pitch, InvalidSemitonesError, PitchProcessingError
-from .waveform import generate_waveform_peaks, save_waveform_data
+from .waveform import generate_waveform_peaks, generate_waveform_peaks_streaming, save_waveform_data
 from .youtube_extractor import (
 	download_audio,
 	YouTubeExtractionError,
@@ -96,6 +97,17 @@ def get_pitch_cache() -> SpeedCache:
 		cache_dir = OUTPUTS_DIR / ".pitch_cache"
 		_pitch_cache = SpeedCache(cache_dir)
 	return _pitch_cache
+
+
+def log_memory_usage(stage: str) -> None:
+	"""Log current memory usage for performance monitoring."""
+	try:
+		process = psutil.Process()
+		mem_info = process.memory_info()
+		mem_mb = mem_info.rss / 1024 / 1024
+		LOGGER.info("Memory usage [%s]: %.1f MB", stage, mem_mb)
+	except Exception as e:
+		LOGGER.warning("Could not log memory usage: %s", e)
 
 
 def get_or_create_separator():
@@ -209,29 +221,27 @@ def _separate_stems(model, audio_path: Path, output_dir: Path, separation_intens
 	if peak > 1.0:
 		both_mix = both_mix / peak
 
-	# Feature 6: capture waveform data for all four tracks now, while
-	# everything is in memory - the original upload is deleted right after
-	# this task succeeds, so this is the only chance to sample it.
-	try:
-		def _to_numpy(tensor):
-			return tensor.detach().cpu().numpy() if hasattr(tensor, "detach") else tensor
-
-		waveforms = {
-			"original": generate_waveform_peaks(_to_numpy(waveform)),
-			"vocals": generate_waveform_peaks(_to_numpy(vocals)),
-			"accompaniment": generate_waveform_peaks(_to_numpy(accompaniment)),
-			"both": generate_waveform_peaks(_to_numpy(both_mix)),
-		}
-		save_waveform_data(output_dir, waveforms)
-	except Exception as e:
-		LOGGER.warning("Waveform data generation failed (continuing without it): %s", e)
-
+	# Save audio stems first, then generate waveforms from files (streaming, memory-efficient)
 	_save_audio_stem(vocals, model.samplerate, output_dir, "vocals")
 	_save_audio_stem(accompaniment, model.samplerate, output_dir, "accompaniment")
 	_save_audio_stem(both_mix, model.samplerate, output_dir, "both")
 	_save_audio_stem(waveform, model.samplerate, output_dir, "original")
 
 	LOGGER.info("Outputs saved (%s): vocals, accompaniment, both, original", AUDIO_OUTPUT_FORMAT)
+
+	# Feature 6: Generate waveforms from saved files via streaming (memory-efficient, no tensor copy)
+	try:
+		waveforms = {
+			"original": generate_waveform_peaks_streaming(output_dir / f"original.{AUDIO_OUTPUT_FORMAT}"),
+			"vocals": generate_waveform_peaks_streaming(output_dir / f"vocals.{AUDIO_OUTPUT_FORMAT}"),
+			"accompaniment": generate_waveform_peaks_streaming(output_dir / f"accompaniment.{AUDIO_OUTPUT_FORMAT}"),
+			"both": generate_waveform_peaks_streaming(output_dir / f"both.{AUDIO_OUTPUT_FORMAT}"),
+		}
+		save_waveform_data(output_dir, waveforms)
+		gc.collect()
+	except Exception as e:
+		LOGGER.warning("Waveform data generation failed (continuing without it): %s", e)
+
 
 
 def _save_audio_stem(audio, samplerate: int, output_dir: Path, name: str) -> None:
@@ -728,6 +738,7 @@ def process_audio_task(
 					100 * (1 - trim_result["trimmed_duration"] / trim_result["original_duration"]),
 				)
 				audio_path = trimmed_path  # Use trimmed audio for separation
+				log_memory_usage("after_trimming")
 			except InvalidTrimRangeError as e:
 				raise ValueError(f"Invalid trim range: {str(e)}") from e
 			except TrimError as e:
@@ -740,15 +751,19 @@ def process_audio_task(
 			progress_start=10, progress_end=95,
 		)
 
+		log_memory_usage("after_separation")
+
 		# Optimization: Delete upload immediately after successful processing (save 300 MB)
 		audio_path.unlink(missing_ok=True)
 		LOGGER.info("Optimization: Upload deleted immediately (freed ~300 MB)")
+		log_memory_usage("after_upload_deletion")
 
 		result["progress"] = 100
 		self.update_state(state="SUCCESS", meta=result)
 
 		# Optimization: Force garbage collection (save ~50-100 MB per 100 tasks)
 		gc.collect()
+		log_memory_usage("after_garbage_collection")
 		LOGGER.info("Optimization: Garbage collection forced after task success")
 
 		return result
