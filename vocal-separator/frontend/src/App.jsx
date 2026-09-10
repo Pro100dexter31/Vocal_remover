@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import FormatSelector from './components/FormatSelector';
 import AudioPreviewPlayer from './components/AudioPreviewPlayer';
 import SpeedControl from './components/SpeedControl';
+import PitchControl from './components/PitchControl';
 import VolumeMeter from './components/VolumeMeter';
 import WaveformComparison from './components/WaveformComparison';
+import AudioTrimmer from './components/AudioTrimmer';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || '';
 const MAX_FILE_SIZE = 500 * 1024 * 1024;
@@ -40,6 +42,9 @@ function App() {
   const [youtubeSubmitting, setYoutubeSubmitting] = useState(false);
   const [youtubeError, setYoutubeError] = useState('');
   const [stage, setStage] = useState(null);  // Task 7.7: 'downloading' | 'separating' | null
+  const [trimStartSeconds, setTrimStartSeconds] = useState(null);  // Audio trimmer: start time
+  const [trimEndSeconds, setTrimEndSeconds] = useState(null);  // Audio trimmer: end time
+  const [selectedFile, setSelectedFile] = useState(null);  // Store file for trimmer
   const speedPollRef = useRef(null);
   const inputRef = useRef(null);
   const pollingRef = useRef(null);
@@ -204,6 +209,9 @@ function App() {
     formData.append('normalize', normalize.toString());
     formData.append('normalization_method', normalizationMethod);
     formData.append('speed', speed.toString());
+    // Add optional trim parameters
+    if (trimStartSeconds !== null) formData.append('trim_start_seconds', trimStartSeconds.toString());
+    if (trimEndSeconds !== null) formData.append('trim_end_seconds', trimEndSeconds.toString());
 
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
@@ -316,7 +324,8 @@ function App() {
     setFileName(file.name);
     setFileSize(file.size / (1024 * 1024));
     setProgress(0);
-    uploadFile(file);
+    setSelectedFile(file);  // Store for trimmer
+    // Don't upload yet - wait for trimmer interaction
   };
 
   const handleDrag = (event) => {
@@ -676,6 +685,11 @@ function App() {
         />
       </div>
 
+      {/* Pitch Control - schimbare tonalitate, doar minus */}
+      <div className="mb-6">
+        <PitchControl taskId={taskId} apiBaseUrl={API_BASE_URL} />
+      </div>
+
       {/* Waveform Comparison - Feature 6 */}
       <div className="mb-6">
         <WaveformComparison
@@ -764,7 +778,7 @@ function App() {
   return (
     <main className="min-h-screen overflow-hidden bg-slate-950 px-5 py-10 text-slate-100 sm:px-8"><div className="mx-auto max-w-4xl">
       <header className="mb-10 animate-fade-in text-center"><div className="mx-auto mb-5 grid h-14 w-14 place-items-center rounded-2xl bg-primary-600 text-2xl shadow-glow">♫</div><p className="mb-2 text-sm font-semibold uppercase tracking-[0.24em] text-primary-300">Vocal Separator</p><h1 className="text-4xl font-extrabold tracking-tight sm:text-6xl">Find the voice inside.</h1><p className="mx-auto mt-4 max-w-xl text-base text-slate-400">Upload a track and receive clean vocal and accompaniment stems.</p></header>
-      <section className="glass-effect animate-slide-in-left rounded-3xl p-5 sm:p-8">{renderUploadZone()}{error && <p role="alert" className="mt-5 rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</p>}{renderLoadingState()}{renderSuccessState()}{(status === 'SUCCESS' || status === 'FAILED') && <button type="button" onClick={handleReset} className="mt-5 text-sm font-semibold text-slate-400 underline-offset-4 hover:text-white hover:underline">Process another file</button>}</section>
+      <section className="glass-effect animate-slide-in-left rounded-3xl p-5 sm:p-8">{renderUploadZone()}{selectedFile && <AudioTrimmer file={selectedFile} onTrimChange={(start, end) => { setTrimStartSeconds(start); setTrimEndSeconds(end); }} onUpload={(start, end) => { setTrimStartSeconds(start); setTrimEndSeconds(end); uploadFile(selectedFile); }} />}{error && <p role="alert" className="mt-5 rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</p>}{renderLoadingState()}{renderSuccessState()}{(status === 'SUCCESS' || status === 'FAILED') && <button type="button" onClick={handleReset} className="mt-5 text-sm font-semibold text-slate-400 underline-offset-4 hover:text-white hover:underline">Process another file</button>}</section>
       <footer className="mt-8 text-center text-sm text-slate-500">Vocal Separator · Audio processing powered by Demucs</footer>
     </div></main>
   );

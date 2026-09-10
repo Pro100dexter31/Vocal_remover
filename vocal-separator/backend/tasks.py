@@ -38,6 +38,7 @@ from .config import (
 from .volume_normalizer import normalize_audio_file, NormalizationError
 from .speed_adjuster import adjust_speed, InvalidSpeedError, SpeedProcessingError
 from .speed_cache import SpeedCache
+from .pitch_shifter import adjust_pitch, InvalidSemitonesError, PitchProcessingError
 from .waveform import generate_waveform_peaks, save_waveform_data
 from .youtube_extractor import (
 	download_audio,
@@ -46,6 +47,7 @@ from .youtube_extractor import (
 	VideoTooLongError,
 	VideoUnavailableError,
 )
+from .audio_trimmer import trim_audio, TrimError, InvalidTrimRangeError
 
 
 LOGGER = logging.getLogger(__name__)
@@ -74,6 +76,7 @@ celery_app.conf.update(
 _separator = None
 _separator_last_used = None
 _speed_cache = None
+_pitch_cache = None
 
 
 def get_speed_cache() -> SpeedCache:
@@ -83,6 +86,16 @@ def get_speed_cache() -> SpeedCache:
 		cache_dir = OUTPUTS_DIR / ".speed_cache"
 		_speed_cache = SpeedCache(cache_dir)
 	return _speed_cache
+
+
+def get_pitch_cache() -> SpeedCache:
+	"""Get or create the pitch adjustment cache (same key/value cache
+	shape as speed, just a separate directory - see SpeedCache)."""
+	global _pitch_cache
+	if _pitch_cache is None:
+		cache_dir = OUTPUTS_DIR / ".pitch_cache"
+		_pitch_cache = SpeedCache(cache_dir)
+	return _pitch_cache
 
 
 def get_or_create_separator():
@@ -422,6 +435,77 @@ def _produce_speed_variant(output_dir: Path, speed: float, on_progress=None) -> 
 		raise SpeedProcessingError(f"Failed to produce {speed}x variant in {output_dir}: {str(e)}")
 
 
+def _shift_to_matching_format(source: Path, target: Path, semitones: float) -> None:
+	"""
+	Pitch-shift `source` by `semitones`, writing to `target` in target's
+	own format. Same MP3 workaround as _stretch_to_matching_format:
+	soundfile can't write MP3, so shift into a temp WAV then re-encode.
+	"""
+	target_format = target.suffix.lstrip(".").lower()
+	if target_format in ("wav", "flac", "ogg"):
+		adjust_pitch(source, target, semitones)
+		return
+
+	temp_wav = target.parent / f"{target.stem}_pitch_tmp.wav"
+	try:
+		adjust_pitch(source, temp_wav, semitones)
+		from .audio_converter import convert_audio
+
+		convert_audio(temp_wav, target, target_format, bitrate=None)
+	finally:
+		temp_wav.unlink(missing_ok=True)
+
+
+def _produce_pitch_variant(output_dir: Path, semitones: float, on_progress=None) -> dict[str, Path]:
+	"""
+	Produce a pitch-shifted copy of the ACCOMPANIMENT stem only (per the
+	feature scope: key change applies to the "minus" track). The master
+	stems are never mutated; the result goes into a dedicated subfolder.
+
+	Args:
+		output_dir: Directory containing the master accompaniment file
+		semitones: Shift amount (-6 to +6, excluding 0)
+		on_progress: Optional callback(fraction: float)
+
+	Returns:
+		Dict with an "accompaniment" Path to the shifted file
+
+	Raises:
+		FileNotFoundError: If the master accompaniment stem is missing
+		PitchProcessingError: If pitch shifting fails
+	"""
+	cache = get_pitch_cache()
+
+	accompaniment_files = list(output_dir.glob("accompaniment.*"))
+	if not accompaniment_files:
+		raise FileNotFoundError(f"Master accompaniment stem not found in {output_dir}")
+	master = accompaniment_files[0]
+
+	variant_dir = output_dir / f"pitch_{semitones}"
+	variant_dir.mkdir(parents=True, exist_ok=True)
+	target = variant_dir / f"accompaniment{master.suffix}"
+
+	try:
+		cached = cache.get_cached_file(master, semitones, "accompaniment")
+		if cached:
+			if cached.resolve() != target.resolve():
+				shutil.copy2(cached, target)
+		else:
+			_shift_to_matching_format(master, target, semitones)
+			cache.cache_file(master, semitones, "accompaniment", target, {})
+
+		if on_progress:
+			on_progress(1.0)
+
+		LOGGER.info("Pitch variant %s semitones produced for %s", semitones, output_dir)
+		return {"accompaniment": target}
+
+	except Exception as e:
+		raise PitchProcessingError(
+			f"Failed to produce {semitones}-semitone variant in {output_dir}: {str(e)}"
+		)
+
+
 def _safe_db(value: float) -> float | None:
 	"""Clamp -inf/+inf/NaN loudness readings to a JSON-safe finite value."""
 	if value is None or math.isnan(value):
@@ -614,6 +698,8 @@ def process_audio_task(
 	normalize: bool = True,
 	speed: float = 1.0,
 	normalization_method: str = "peak",
+	trim_start_seconds: float | None = None,
+	trim_end_seconds: float | None = None,
 ) -> dict[str, Any]:
 	"""Separate one uploaded file into vocals and accompaniment WAV files.
 
@@ -622,10 +708,32 @@ def process_audio_task(
 		normalize: Apply volume normalization after separation (default: True)
 		speed: Speed adjustment factor (0.5-2.0, default 1.0 for no change)
 		normalization_method: "peak" (-1dBFS) or "lufs" (-14 LUFS, YouTube target)
+		trim_start_seconds: Optional start time in seconds for audio trimming
+		trim_end_seconds: Optional end time in seconds for audio trimming
 	"""
 	output_dir = OUTPUTS_DIR / task_id
 	audio_path = Path(file_path).resolve()
 	try:
+		# Apply audio trimming if specified (saves processing time & resources)
+		if trim_start_seconds is not None and trim_end_seconds is not None:
+			self.update_state(state="PROCESSING", meta={"progress": 5, "stage": "trimming", "task_id": task_id})
+			try:
+				trimmed_path = output_dir / "trimmed_input.wav"
+				output_dir.mkdir(parents=True, exist_ok=True)
+				trim_result = trim_audio(audio_path, trimmed_path, trim_start_seconds, trim_end_seconds)
+				LOGGER.info(
+					"Audio trimmed: %.2f → %.2f seconds (%.1f%% reduction)",
+					trim_result["original_duration"],
+					trim_result["trimmed_duration"],
+					100 * (1 - trim_result["trimmed_duration"] / trim_result["original_duration"]),
+				)
+				audio_path = trimmed_path  # Use trimmed audio for separation
+			except InvalidTrimRangeError as e:
+				raise ValueError(f"Invalid trim range: {str(e)}") from e
+			except TrimError as e:
+				LOGGER.warning("Audio trimming failed (continuing without trim): %s", e)
+				# Continue without trimming if it fails
+
 		result = _run_separation_pipeline(
 			self, task_id, audio_path, output_dir,
 			separation_intensity, normalize, speed, normalization_method,
@@ -785,6 +893,42 @@ def apply_speed_task(self, source_task_id: str, speed: float) -> dict[str, Any]:
 		return result
 	except Exception as exc:
 		LOGGER.exception("Speed variant task failed for %s at %sx", source_task_id, speed)
+		if self.request.retries < self.max_retries:
+			raise self.retry(exc=exc, countdown=3)
+		raise
+
+
+@celery_app.task(
+	bind=True,
+	base=CallbackTask,
+	name="backend.tasks.apply_pitch_task",
+	max_retries=1,
+)
+def apply_pitch_task(self, source_task_id: str, semitones: float) -> dict[str, Any]:
+	"""Produce a pitch-shifted copy of a completed task's ACCOMPANIMENT
+	stem (the "minus" track), keeping tempo unchanged and without touching
+	the master files (see _produce_pitch_variant).
+	"""
+	output_dir = OUTPUTS_DIR / source_task_id
+	try:
+		self.update_state(state="PROCESSING", meta={"progress": 5})
+
+		def report(fraction: float) -> None:
+			self.update_state(state="PROCESSING", meta={"progress": 5 + int(90 * fraction)})
+
+		_produce_pitch_variant(output_dir, semitones, on_progress=report)
+
+		result = {
+			"status": "SUCCESS",
+			"progress": 100,
+			"source_task_id": source_task_id,
+			"semitones": semitones,
+			"accompaniment_url": f"/api/download/{source_task_id}/accompaniment?pitch={semitones}",
+		}
+		self.update_state(state="SUCCESS", meta=result)
+		return result
+	except Exception as exc:
+		LOGGER.exception("Pitch variant task failed for %s at %s semitones", source_task_id, semitones)
 		if self.request.retries < self.max_retries:
 			raise self.retry(exc=exc, countdown=3)
 		raise

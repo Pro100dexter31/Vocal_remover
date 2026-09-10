@@ -2,6 +2,7 @@
 
 import logging
 import shutil
+import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
@@ -11,6 +12,7 @@ from celery.result import AsyncResult
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel
 
 from .audio_converter import (
@@ -27,7 +29,23 @@ from .config import (
 	OUTPUTS_DIR,
 	UPLOADS_DIR,
 )
-from .tasks import celery_app, process_audio_task, apply_speed_task, process_youtube_task
+from .tasks import (
+	celery_app,
+	process_audio_task,
+	apply_speed_task,
+	apply_pitch_task,
+	process_youtube_task,
+)
+from .pitch_shifter import (
+	adjust_pitch,
+	validate_semitones,
+	InvalidSemitonesError,
+	PitchAdjustmentError,
+	MIN_SEMITONES,
+	MAX_SEMITONES,
+	PREVIEW_DURATION_SECONDS,
+	PREVIEW_SAMPLE_RATE,
+)
 from .speed_adjuster import SUPPORTED_SPEEDS
 from .waveform import load_waveform_data
 from .youtube_extractor import (
@@ -37,6 +55,7 @@ from .youtube_extractor import (
 	VideoTooLongError,
 	VideoUnavailableError,
 )
+from .audio_trimmer import get_audio_duration, TrimError
 
 
 LOGGER = logging.getLogger(__name__)
@@ -79,11 +98,28 @@ def _status_payload(task_id: str, result: AsyncResult) -> dict[str, Any]:
 	return payload
 
 
+def _warm_up_pitch_shift() -> None:
+	"""Pre-compile librosa/numba code paths used by the pitch preview, so the
+	first real user request isn't hit by an ~8s JIT compile."""
+	try:
+		import numpy as np
+		import librosa
+
+		y = np.zeros(PREVIEW_SAMPLE_RATE // 2, dtype=np.float32)
+		librosa.effects.pitch_shift(y, sr=PREVIEW_SAMPLE_RATE, n_steps=1, res_type="soxr_lq")
+		LOGGER.info("Pitch-shift warm-up complete")
+	except Exception as e:
+		LOGGER.warning("Pitch-shift warm-up failed (previews will be slow on first call): %s", e)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
 	LOGGER.info("Vocal Separator API starting")
 	UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 	OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+	import asyncio
+
+	asyncio.get_event_loop().run_in_executor(None, _warm_up_pitch_shift)
 	try:
 		yield
 	finally:
@@ -145,7 +181,16 @@ async def upload_audio(
 	normalize: bool = Form(True),
 	speed: float = Form(1.0),
 	normalization_method: str = Form("peak"),
+	trim_start_seconds: float | None = Form(None),
+	trim_end_seconds: float | None = Form(None),
 ) -> UploadResponse:
+	"""Upload audio file for separation.
+
+	Optional trim parameters:
+	- trim_start_seconds: Start time in seconds (0-indexed)
+	- trim_end_seconds: End time in seconds
+	If both provided, audio is trimmed before separation (saves processing time).
+	"""
 	filename = Path(file.filename or "").name
 	extension = Path(filename).suffix.lower()
 	if not filename or extension not in ALLOWED_EXTENSIONS:
@@ -168,7 +213,7 @@ async def upload_audio(
 				output_file.write(chunk)
 		await file.close()
 		process_audio_task.apply_async(
-			args=[task_id, str(destination), separation_intensity, normalize, speed, normalization_method],
+			args=[task_id, str(destination), separation_intensity, normalize, speed, normalization_method, trim_start_seconds, trim_end_seconds],
 			task_id=task_id,
 		)
 	except HTTPException:
@@ -184,6 +229,51 @@ async def upload_audio(
 		status="PENDING",
 		message="Audio uploaded and queued for separation",
 	)
+
+
+@app.post("/api/audio-info")
+async def get_audio_info(file: UploadFile = File(...)) -> dict[str, any]:
+	"""Get audio file information without processing.
+
+	Returns duration and other metadata for timeline display.
+	"""
+	filename = Path(file.filename or "").name
+	extension = Path(filename).suffix.lower()
+	if not filename or extension not in ALLOWED_EXTENSIONS:
+		raise HTTPException(
+			status_code=400,
+			detail=f"Unsupported file type. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
+		)
+
+	temp_path = None
+	try:
+		# Save to temp file
+		temp_path = Path(tempfile.gettempdir()) / f"temp_audio_info_{uuid4()}{extension}"
+		total_size = 0
+		with temp_path.open("wb") as output_file:
+			while chunk := await file.read(1024 * 1024):
+				total_size += len(chunk)
+				if total_size > MAX_FILE_SIZE_BYTES:
+					raise HTTPException(status_code=413, detail="File exceeds the 500 MB limit")
+				output_file.write(chunk)
+
+		duration = get_audio_duration(temp_path)
+
+		return {
+			"filename": filename,
+			"duration": duration,
+			"duration_formatted": f"{int(duration // 60)}:{int(duration % 60):02d}",
+		}
+
+	except TrimError as e:
+		raise HTTPException(status_code=400, detail=str(e)) from e
+	except Exception as e:
+		LOGGER.exception("Failed to get audio info: %s", e)
+		raise HTTPException(status_code=500, detail="Could not read audio file") from e
+	finally:
+		if temp_path and temp_path.exists():
+			temp_path.unlink(missing_ok=True)
+		await file.close()
 
 
 class YouTubeRequest(BaseModel):
@@ -247,7 +337,30 @@ async def download_audio(
 	task_id: str,
 	file_type: Literal["vocals", "accompaniment", "both", "original"],
 	speed: float | None = Query(None, description="Optional speed variant produced via /api/process (vocals/accompaniment only)"),
+	pitch: float | None = Query(None, description="Optional pitch variant (semitones) produced via /api/pitch (accompaniment only)"),
 ) -> FileResponse:
+	# Pitch-shifted variant: look inside the dedicated pitch_{semitones}
+	# subfolder produced by apply_pitch_task. Accompaniment-only by design.
+	if pitch is not None and pitch != 0:
+		if file_type != "accompaniment":
+			raise HTTPException(status_code=400, detail="Pitch variants exist only for 'accompaniment'.")
+		variant_dir = OUTPUTS_DIR / task_id / f"pitch_{pitch}"
+		matches = list(variant_dir.glob("accompaniment.*"))
+		if not matches:
+			raise HTTPException(
+				status_code=404,
+				detail=f"No {pitch:+g}-semitone variant found. Call POST /api/pitch/{task_id}?semitones={pitch} first.",
+			)
+		file_path = matches[0]
+		media_type = _get_media_type(file_path.suffix.lstrip("."))
+		filename = f"accompaniment_{pitch:+g}st{file_path.suffix}"
+		return FileResponse(
+			path=file_path,
+			media_type=media_type,
+			filename=filename,
+			headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+		)
+
 	# Speed-adjusted variant: look inside the dedicated speed_{speed} subfolder
 	# produced by apply_speed_task, instead of the master stems.
 	if speed is not None and speed != 1.0:
@@ -662,5 +775,110 @@ async def process_speed_adjustment(
 		"source_task_id": task_id,
 		"speed": speed,
 		"message": f"Speed adjustment queued for {speed}x",
+		"estimated_duration_seconds": estimated_duration_seconds,
+	}
+
+
+def _resolve_accompaniment_master(task_id: str) -> Path:
+	"""Return the on-disk accompaniment stem for a completed task, or 404."""
+	matches = list((OUTPUTS_DIR / task_id).glob("accompaniment.*"))
+	if not matches:
+		raise HTTPException(
+			status_code=404,
+			detail="Task output not found. Please complete separation first.",
+		)
+	return matches[0]
+
+
+@app.post("/api/pitch-preview/{task_id}")
+async def pitch_preview(
+	task_id: str,
+	semitones: float = Query(0.0, ge=MIN_SEMITONES, le=MAX_SEMITONES),
+) -> FileResponse:
+	"""
+	Return a short (~15s) pitch-shifted clip of the accompaniment ("minus")
+	track, processed synchronously, for a responsive "live" preview while
+	the user drags the semitone slider. The full-length version is produced
+	separately via POST /api/pitch/{task_id}.
+
+	Raises:
+		HTTPException 400: semitones out of range
+		HTTPException 404: task output not found
+		HTTPException 500: pitch processing failed
+	"""
+	try:
+		validate_semitones(semitones)
+	except InvalidSemitonesError as e:
+		raise HTTPException(status_code=400, detail=str(e)) from e
+
+	master = _resolve_accompaniment_master(task_id)
+
+	# Write the clip to a NamedTemporaryFile that FileResponse streams and
+	# then cleans up (delete=False so it survives until the response is sent;
+	# BackgroundTask removes it afterward).
+	suffix = master.suffix if master.suffix in (".wav", ".flac", ".ogg") else ".wav"
+	tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+	tmp.close()
+	clip_path = Path(tmp.name)
+
+	try:
+		adjust_pitch(master, clip_path, semitones, max_duration_seconds=PREVIEW_DURATION_SECONDS)
+	except PitchAdjustmentError as e:
+		clip_path.unlink(missing_ok=True)
+		LOGGER.error("Pitch preview failed for %s: %s", task_id, e)
+		raise HTTPException(status_code=500, detail="Could not generate pitch preview") from e
+
+	return FileResponse(
+		path=clip_path,
+		media_type=_get_media_type(clip_path.suffix.lstrip(".")),
+		headers={"Cache-Control": "no-store"},
+		background=BackgroundTask(clip_path.unlink, missing_ok=True),
+	)
+
+
+@app.post("/api/pitch/{task_id}")
+async def process_pitch_adjustment(
+	task_id: str,
+	semitones: float = Query(0.0, ge=MIN_SEMITONES, le=MAX_SEMITONES),
+) -> dict[str, Any]:
+	"""
+	Queue a full-length pitch shift of the accompaniment ("minus") stem.
+
+	Mirrors /api/process (speed): returns a *new* job task_id to poll via
+	GET /api/status/{task_id}; once SUCCESS, download with
+	GET /api/download/{original task_id}/accompaniment?pitch={semitones}.
+
+	Raises:
+		HTTPException 400: semitones out of range
+		HTTPException 404: task output not found
+	"""
+	try:
+		validate_semitones(semitones)
+	except InvalidSemitonesError as e:
+		raise HTTPException(status_code=400, detail=str(e)) from e
+
+	master = _resolve_accompaniment_master(task_id)
+
+	if semitones == 0:
+		return {
+			"status": "completed",
+			"task_id": task_id,
+			"semitones": 0,
+			"message": "0 semitones (no adjustment needed)",
+			"accompaniment_url": f"/api/download/{task_id}/accompaniment",
+		}
+
+	approx_bitrate_bps = 192_000
+	audio_seconds = (master.stat().st_size * 8) / approx_bitrate_bps
+	estimated_duration_seconds = round(audio_seconds * 3)  # pitch_shift is slower than time_stretch
+
+	job = apply_pitch_task.apply_async(args=[task_id, semitones])
+
+	return {
+		"status": "processing",
+		"task_id": job.id,
+		"source_task_id": task_id,
+		"semitones": semitones,
+		"message": f"Pitch shift queued for {semitones:+g} semitones",
 		"estimated_duration_seconds": estimated_duration_seconds,
 	}
