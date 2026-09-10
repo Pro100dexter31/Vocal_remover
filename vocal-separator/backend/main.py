@@ -373,6 +373,17 @@ async def websocket_status(websocket: WebSocket, task_id: str):
 		await websocket.close(code=1011, reason=str(e))
 
 
+def _get_display_name(file_type: str) -> str:
+	"""Map internal file type to display name for downloads."""
+	mapping = {
+		"vocals": "vocals",
+		"accompaniment": "minus",
+		"both": "both",
+		"original": "original",
+	}
+	return mapping.get(file_type, file_type)
+
+
 @app.get("/api/download/{task_id}/{file_type}")
 async def download_audio(
 	task_id: str,
@@ -394,7 +405,8 @@ async def download_audio(
 			)
 		file_path = matches[0]
 		media_type = _get_media_type(file_path.suffix.lstrip("."))
-		filename = f"accompaniment_{pitch:+g}st{file_path.suffix}"
+		display_name = _get_display_name(file_type)
+		filename = f"song({display_name})_{pitch:+g}st{file_path.suffix}"
 		return FileResponse(
 			path=file_path,
 			media_type=media_type,
@@ -414,7 +426,8 @@ async def download_audio(
 			)
 		file_path = matches[0]
 		media_type = _get_media_type(file_path.suffix.lstrip("."))
-		filename = f"{file_type}_{speed}x{file_path.suffix}"
+		display_name = _get_display_name(file_type)
+		filename = f"song({display_name})_{speed}x{file_path.suffix}"
 		return FileResponse(
 			path=file_path,
 			media_type=media_type,
@@ -423,14 +436,15 @@ async def download_audio(
 		)
 
 	# Optimization: Try MP3 first (smaller files), fallback to WAV for backward compatibility
+	display_name = _get_display_name(file_type)
 	if AUDIO_OUTPUT_FORMAT == "mp3":
 		file_path = OUTPUTS_DIR / task_id / f"{file_type}.mp3"
 		media_type = "audio/mpeg"
-		filename = f"{file_type}.mp3"
+		filename = f"song({display_name}).mp3"
 	else:
 		file_path = OUTPUTS_DIR / task_id / f"{file_type}.wav"
 		media_type = "audio/wav"
-		filename = f"{file_type}.wav"
+		filename = f"song({display_name}).wav"
 
 	# Fallback: check other format if file not found
 	if not file_path.is_file():
