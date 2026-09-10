@@ -35,9 +35,9 @@ services:
       # Phase 1 Optimizations
       RETENTION_HOURS: "1"
       CLEANUP_INTERVAL_MINUTES: "15"
-      MODEL_IDLE_TIMEOUT_SECONDS: "150"
+      MODEL_IDLE_TIMEOUT_SECONDS: "3600"
       MP3_BITRATE: "128k"
-      DEMUCS_OVERLAP: "0.1"
+      DEMUCS_OVERLAP: "0.25"
     depends_on:
       redis:
         condition: service_healthy
@@ -66,9 +66,9 @@ services:
       # Phase 1 Optimizations
       RETENTION_HOURS: "1"
       CLEANUP_INTERVAL_MINUTES: "15"
-      MODEL_IDLE_TIMEOUT_SECONDS: "150"
+      MODEL_IDLE_TIMEOUT_SECONDS: "3600"
       MP3_BITRATE: "128k"
-      DEMUCS_OVERLAP: "0.1"
+      DEMUCS_OVERLAP: "0.25"
     depends_on:
       redis:
         condition: service_healthy

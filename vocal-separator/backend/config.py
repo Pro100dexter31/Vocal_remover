@@ -71,7 +71,7 @@ CORS_ORIGINS = [origin.strip() for origin in _cors_origins.split(",") if origin.
 DEMUCS_MODEL = os.getenv("DEMUCS_MODEL", "htdemucs")
 
 # Higher overlap means better quality and slower processing (Demucs default 0.25).
-DEMUCS_OVERLAP = float(os.getenv("DEMUCS_OVERLAP", "0.1"))
+DEMUCS_OVERLAP = float(os.getenv("DEMUCS_OVERLAP", "0.25"))
 
 # Cores used for separation. Defaults to 60% of them so the machine stays cool
 # and responsive; set DEMUCS_THREADS to override.
@@ -95,7 +95,7 @@ AUDIO_OUTPUT_FORMAT = os.getenv("AUDIO_OUTPUT_FORMAT", "mp3").lower()
 MP3_BITRATE = os.getenv("MP3_BITRATE", "128k")
 
 # Model idle timeout: unload from RAM if idle > N seconds to save memory.
-MODEL_IDLE_TIMEOUT_SECONDS = int(os.getenv("MODEL_IDLE_TIMEOUT_SECONDS", "150"))
+MODEL_IDLE_TIMEOUT_SECONDS = int(os.getenv("MODEL_IDLE_TIMEOUT_SECONDS", "3600"))
 
 
 # YouTube audio extraction (Feature 7). Duration is checked from metadata
