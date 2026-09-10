@@ -14,7 +14,7 @@ docker exec vocal_remover-backend-1 python3 -m pytest backend/ -v
 în `backend/Dockerfile`) — nu necesită setup manual.
 
 ## Rezultat la ultima rulare
-**118 teste, toate trec** (`118 passed`), ~2 minute.
+**137 teste, toate trec** (`137 passed`), ~1.5 minute.
 
 ## Acoperire pe fișier (backend, unit tests)
 
@@ -23,6 +23,7 @@ docker exec vocal_remover-backend-1 python3 -m pytest backend/ -v
 | `test_audio_conversions.py` | 40 | Validare format/bitrate, conversii reale WAV→MP3/FLAC/OGG, estimare dimensiune, erori |
 | `test_youtube_extractor.py` | 29 | Validare URL, metadata (mock), prag 15 min, download (mock) |
 | `test_speed_adjuster.py` | 19 | Time-stretch, pitch invariance, cache, validare viteză |
+| `test_pitch_shifter.py` | 19 | Pitch shift, tempo păstrat, f0 verificat (up/down), preview mode, validare -6..+6 |
 | `test_speed_comprehensive.py` | 15 | Calitate/stabilitate pitch la toate vitezele, performanță, conținut spectral |
 | `test_volume_normalizer.py` | 8 | Peak/LUFS, gain, RMS, edge cases |
 | `test_converters_setup.py` | 6 | Sanity check mediu (librerii importabile, ffmpeg disponibil) |

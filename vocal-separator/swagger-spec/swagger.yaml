@@ -47,6 +47,8 @@ tags:
     description: Stream audio for in-browser playback, with range-request seeking
   - name: Speed Control
     description: Playback speed adjustment (0.5x-2.0x, pitch-preserving)
+  - name: Pitch Control
+    description: Musical key shift of the accompaniment (-6..+6 semitones, tempo-preserving)
 
 paths:
   /api/health:
@@ -301,6 +303,18 @@ paths:
             `POST /api/process/{task_id}?speed={speed}` instead of the
             1.0x master. Must match a speed that was already requested and
             completed via that endpoint, or this returns 404.
+        - name: pitch
+          in: query
+          required: false
+          schema:
+            type: number
+            format: float
+          description: |
+            Optional, **accompaniment only**. When set to a non-zero
+            semitone value, downloads the pitch-shifted variant produced by
+            `POST /api/pitch/{task_id}?semitones={pitch}`. Returns 404 if
+            that variant hasn't been produced yet, 400 if file_type isn't
+            "accompaniment".
       responses:
         '200':
           description: Audio file attachment (master, or the requested speed variant)
@@ -617,6 +631,92 @@ paths:
                     loc: [query, speed]
                     msg: Input should be less than or equal to 2
                     input: "3.0"
+
+  /api/pitch-preview/{task_id}:
+    post:
+      summary: Short pitch-shifted preview clip of the accompaniment
+      description: |
+        Returns a ~8s pitch-shifted clip of the "minus" (accompaniment)
+        track, processed synchronously at reduced quality for speed
+        (~200ms once numba is warm). Meant to be called with debounce as
+        the user drags a semitone slider, so they hear the new key
+        immediately. Musical key changes; tempo does not.
+      tags: [Pitch Control]
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: semitones
+          in: query
+          required: false
+          schema: { type: number, format: float, minimum: -6, maximum: 6, default: 0 }
+      responses:
+        '200':
+          description: Audio clip (wav or the stem's own format)
+          content:
+            audio/wav:
+              schema: { type: string, format: binary }
+        '404':
+          description: Task output not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorDetail' }
+        '422':
+          description: semitones outside -6..+6
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidationError' }
+        '500':
+          description: Pitch processing failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorDetail' }
+
+  /api/pitch/{task_id}:
+    post:
+      summary: Queue a full-length pitch shift of the accompaniment
+      description: |
+        Full, native-quality version of `/api/pitch-preview`. Mirrors
+        `/api/process` (speed): returns a *new* job `task_id` to poll via
+        `/api/status/{task_id}`; once SUCCESS, download with
+        `/api/download/{original task_id}/accompaniment?pitch={semitones}`.
+        semitones=0 returns "completed" immediately with the master URL.
+      tags: [Pitch Control]
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: semitones
+          in: query
+          required: false
+          schema: { type: number, format: float, minimum: -6, maximum: 6, default: 0 }
+      responses:
+        '200':
+          description: Job queued (or "completed" for semitones=0)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [processing, completed] }
+                  task_id: { type: string, description: New job id to poll (or the original id when completed) }
+                  source_task_id: { type: string }
+                  semitones: { type: number }
+                  message: { type: string }
+                  estimated_duration_seconds: { type: integer }
+                  accompaniment_url: { type: string }
+        '404':
+          description: Task output not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorDetail' }
+        '422':
+          description: semitones outside -6..+6
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidationError' }
 
 components:
   schemas:

@@ -3,8 +3,6 @@ import FormatSelector from './components/FormatSelector';
 import AudioPreviewPlayer from './components/AudioPreviewPlayer';
 import SpeedControl from './components/SpeedControl';
 import PitchControl from './components/PitchControl';
-import VolumeMeter from './components/VolumeMeter';
-import WaveformComparison from './components/WaveformComparison';
 import AudioTrimmer from './components/AudioTrimmer';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || '';
@@ -34,7 +32,6 @@ function App() {
   const [activePreviewPlayer, setActivePreviewPlayer] = useState(null);  // Task 4.4: Track active player
   const [audioDuration, setAudioDuration] = useState(0);  // Track original duration
   const [speedJob, setSpeedJob] = useState({ speed: 1.0, status: 'ready', jobId: null, message: '' });
-  const [normalizationInfo, setNormalizationInfo] = useState(null);  // Task 3.5: Volume meter data
   const [seekRequest, setSeekRequest] = useState(null);  // Task 6.3: click waveform to seek preview
   const [previewCurrentTime, setPreviewCurrentTime] = useState(0);  // live playhead for waveform
   const [sourceMode, setSourceMode] = useState('file');  // Task 7.6: 'file' | 'youtube'
@@ -80,7 +77,6 @@ function App() {
     setStage(data.stage || null);
     if (data.status === 'SUCCESS') {
       setResults({ vocalsUrl: data.vocals_url, accompanimentUrl: data.accompaniment_url });
-      setNormalizationInfo(data.normalization || null);
       setLoading(false);
       return true;
     }
@@ -478,7 +474,6 @@ function App() {
     setActivePreviewPlayer(null);
     setAudioDuration(0);
     setSpeedJob({ speed: 1.0, status: 'ready', jobId: null, message: '' });
-    setNormalizationInfo(null);
     setSeekRequest(null);
     setYoutubeUrl('');
     setYoutubeError('');
@@ -649,22 +644,6 @@ function App() {
         />
       </div>
 
-      {/* Volume Meter - Task 3.5 */}
-      {normalizationInfo && (
-        <div className="mb-6 grid gap-4 sm:grid-cols-2">
-          <VolumeMeter
-            title={`Voce izolată — ${normalizationInfo.method === 'lufs' ? 'LUFS' : 'Peak dB'}`}
-            beforeDb={normalizationInfo.vocals?.before_db}
-            afterDb={normalizationInfo.vocals?.after_db}
-          />
-          <VolumeMeter
-            title={`Minus — ${normalizationInfo.method === 'lufs' ? 'LUFS' : 'Peak dB'}`}
-            beforeDb={normalizationInfo.accompaniment?.before_db}
-            afterDb={normalizationInfo.accompaniment?.after_db}
-          />
-        </div>
-      )}
-
       {/* Speed Control - Task 5.4 */}
       <div className="mb-6">
         <SpeedControl
@@ -688,17 +667,6 @@ function App() {
       {/* Pitch Control - schimbare tonalitate, doar minus */}
       <div className="mb-6">
         <PitchControl taskId={taskId} apiBaseUrl={API_BASE_URL} />
-      </div>
-
-      {/* Waveform Comparison - Feature 6 */}
-      <div className="mb-6">
-        <WaveformComparison
-          taskId={taskId}
-          apiBaseUrl={API_BASE_URL}
-          duration={audioDuration}
-          currentTime={previewCurrentTime}
-          onSeek={(time) => setSeekRequest({ time, requestId: Date.now() })}
-        />
       </div>
 
       <div className="mb-6">

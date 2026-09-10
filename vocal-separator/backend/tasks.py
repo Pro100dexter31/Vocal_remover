@@ -64,7 +64,7 @@ celery_app.conf.update(
 	task_track_started=True,
 	task_time_limit=CELERY_TASK_TIME_LIMIT,
 	task_soft_time_limit=CELERY_TASK_SOFT_TIME_LIMIT,
-	result_expires=86400,
+	result_expires=3600,
 	beat_schedule={
 		"cleanup-expired-audio": {
 			"task": "backend.tasks.cleanup_old_tasks",

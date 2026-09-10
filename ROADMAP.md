@@ -34,7 +34,15 @@ pipeline de separare ca la upload. Limită 15 min (verificată din
 metadata, înainte de download). Progres pe 2 etape (downloading →
 separating).
 
-## Faza 8 — Neplanificat încă
+## Faza 8 — Schimbare tonalitate (pitch) pentru minus ✅ Livrat
+Slider -6..+6 semitonuri pentru instrumentalul ("minus"). Preview "live":
+fragment scurt de ~8s procesat sincron la calitate redusă (~200ms după
+warmup numba), regenerat cu debounce cand utilizatorul mută slider-ul.
+Buton separat "Pregătește pentru download" → job full-length async →
+download. Se schimbă doar cheia muzicală, tempo-ul rămâne neschimbat
+(librosa phase-vocoder). Doar pe minus, nu pe voce.
+
+## Faza 9 — Neplanificat încă
 Idei posibile, nu confirmate:
 - Autentificare/istoric per utilizator (contrazice BR.md actual — de
   discutat dacă chiar se dorește)

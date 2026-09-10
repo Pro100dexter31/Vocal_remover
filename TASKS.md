@@ -27,6 +27,9 @@ fișier să devină un alt document de fantezie ca cele șterse.
 | YouTube: progres 2 etape (downloading/separating) | ✅ | curl, poll live, tranziție confirmată |
 | YouTube: cleanup fișiere temporare | ✅ | verificat, niciun leftover |
 | Swagger docs sincronizate cu codul | ✅ | `vocal-separator/swagger-spec/swagger.yaml`, servit live pe :8080 |
+| Pitch: preview live scurt (accompaniment) | ✅ | curl, ~200ms dupa warmup numba |
+| Pitch: job full-length + download | ✅ | curl end-to-end, durata pastrata + centroid mutat corect |
+| Pitch: warmup numba la startup (primul preview rapid) | ✅ | primul preview dupa restart = 247ms |
 
 ## Frontend
 
@@ -42,6 +45,7 @@ fișier să devină un alt document de fantezie ca cele șterse.
 | Waveform comparison, playhead live | ✅ | build reușit, logică verificată |
 | Toggle Peak/LUFS | ✅ | testat prin flux complet |
 | Slider intensitate separare | 🔻 ascuns din UI | la cererea utilizatorului — backend tot primește 0.5 implicit |
+| Pitch control (slider tonalitate minus, preview live) | ✅ | build reușit; backend verificat separat end-to-end |
 
 ⚠️ = fix aplicat și logic corect, dar nu confirmat vizual într-un browser
 real de către utilizator (nu am unealtă de control browser).

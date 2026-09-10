@@ -49,8 +49,8 @@ OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # Uploads and separated stems are deleted once they are older than this.
-RETENTION_HOURS = int(os.getenv("RETENTION_HOURS", "24"))
-CLEANUP_INTERVAL_MINUTES = int(os.getenv("CLEANUP_INTERVAL_MINUTES", "60"))
+RETENTION_HOURS = int(os.getenv("RETENTION_HOURS", "1"))
+CLEANUP_INTERVAL_MINUTES = int(os.getenv("CLEANUP_INTERVAL_MINUTES", "15"))
 
 
 # Development frontend origins. Override with a comma-separated .env value.
@@ -66,7 +66,7 @@ CORS_ORIGINS = [origin.strip() for origin in _cors_origins.split(",") if origin.
 DEMUCS_MODEL = os.getenv("DEMUCS_MODEL", "htdemucs")
 
 # Higher overlap means better quality and slower processing (Demucs default 0.25).
-DEMUCS_OVERLAP = float(os.getenv("DEMUCS_OVERLAP", "0.25"))
+DEMUCS_OVERLAP = float(os.getenv("DEMUCS_OVERLAP", "0.1"))
 
 # Cores used for separation. Defaults to 60% of them so the machine stays cool
 # and responsive; set DEMUCS_THREADS to override.
@@ -87,10 +87,10 @@ MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
 # Audio output format and compression settings (optimization).
 AUDIO_OUTPUT_FORMAT = os.getenv("AUDIO_OUTPUT_FORMAT", "mp3").lower()
-MP3_BITRATE = os.getenv("MP3_BITRATE", "192k")
+MP3_BITRATE = os.getenv("MP3_BITRATE", "128k")
 
 # Model idle timeout: unload from RAM if idle > N seconds to save memory.
-MODEL_IDLE_TIMEOUT_SECONDS = int(os.getenv("MODEL_IDLE_TIMEOUT_SECONDS", "300"))
+MODEL_IDLE_TIMEOUT_SECONDS = int(os.getenv("MODEL_IDLE_TIMEOUT_SECONDS", "150"))
 
 
 # YouTube audio extraction (Feature 7). Duration is checked from metadata
