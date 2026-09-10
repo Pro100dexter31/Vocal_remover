@@ -49,6 +49,7 @@ from .youtube_extractor import (
 	VideoUnavailableError,
 )
 from .audio_trimmer import trim_audio, TrimError, InvalidTrimRangeError
+from .audio_chunker import AudioChunker
 
 
 LOGGER = logging.getLogger(__name__)
@@ -154,8 +155,8 @@ def get_or_create_separator():
 def _separate_stems(model, audio_path: Path, output_dir: Path, separation_intensity: float = 0.5, on_progress=None) -> None:
 	"""Split the track into vocals and accompaniment inside output_dir.
 
-	Demucs exposes no progress callback, so progress is estimated from elapsed
-	time against the track duration while separation runs on a worker thread.
+	For large files (>60s), uses chunked processing to reduce peak RAM.
+	For normal files, processes entire track in memory.
 
 	Args:
 		separation_intensity: Controls vocal emphasis (0.0-1.0):
@@ -168,6 +169,15 @@ def _separate_stems(model, audio_path: Path, output_dir: Path, separation_intens
 	from demucs.apply import apply_model
 	from demucs.audio import AudioFile
 
+	# Check if chunking needed
+	chunker = AudioChunker(audio_path, chunk_duration_seconds=30.0, overlap_seconds=2.0)
+
+	if chunker.should_chunk():
+		LOGGER.info("Large audio detected (%.1f min) — using chunked separation", chunker.total_duration / 60.0)
+		_separate_stems_chunked(model, audio_path, output_dir, separation_intensity, on_progress, chunker)
+		return
+
+	# Standard processing for normal-length audio
 	waveform = AudioFile(str(audio_path)).read(
 		streams=0,
 		samplerate=model.samplerate,
@@ -203,19 +213,10 @@ def _separate_stems(model, audio_path: Path, output_dir: Path, separation_intens
 	accompaniment = sum(audio for name, audio in stems.items() if name != "vocals")
 
 	# Apply separation intensity: blend original audio with separated stems based on intensity
-	# intensity = 0.0 -> pure accompaniment (no vocals)
-	# intensity = 0.5 -> balanced (50% original + 50% separation)
-	# intensity = 1.0 -> vocals maximized (original mix emphasized)
 	if separation_intensity != 0.5:
-		# Clamp intensity to valid range
 		intensity = max(0.0, min(1.0, separation_intensity))
-		# Blend: more intensity = more vocals in final output
 		vocals = vocals * intensity + (waveform - accompaniment) * (1.0 - intensity)
 
-	# Real "both" mix = the two downloadable stems summed - reflects any
-	# intensity blending already applied to `vocals` above, unlike just
-	# reusing the pre-separation `waveform`. Clamp in case summing pushes
-	# any sample past full scale.
 	both_mix = vocals + accompaniment
 	peak = float(both_mix.abs().max()) if hasattr(both_mix, "abs") else float(abs(both_mix).max())
 	if peak > 1.0:
@@ -242,6 +243,98 @@ def _separate_stems(model, audio_path: Path, output_dir: Path, separation_intens
 	except Exception as e:
 		LOGGER.warning("Waveform data generation failed (continuing without it): %s", e)
 
+
+def _separate_stems_chunked(model, audio_path: Path, output_dir: Path, separation_intensity: float, on_progress, chunker: AudioChunker) -> None:
+	"""Process audio in chunks to reduce peak RAM for large files."""
+	from demucs.apply import apply_model
+	import numpy as np
+
+	LOGGER.info("Chunked separation: %d chunks of ~%.0fs",
+		(chunker.total_frames // chunker.step_frames) + 1,
+		chunker.chunk_duration)
+
+	all_chunks_vocals = []
+	all_chunks_accompaniment = []
+	all_chunks_both = []
+	all_chunks_original = []
+
+	chunk_count = 0
+	for chunk, start_frame, end_frame in chunker.iter_chunks():
+		chunk_count += 1
+
+		reference = chunk.mean(axis=0) if chunk.ndim > 1 else chunk.mean()
+		reference_std = 1.0
+		if hasattr(reference, 'std'):
+			reference_std = reference.std()
+			if reference_std == 0:
+				reference_std = 1.0
+
+		normalized = (chunk - reference) / reference_std if reference_std > 0 else chunk
+
+		if normalized.ndim == 1:
+			normalized = normalized[np.newaxis, np.newaxis, :]
+		elif normalized.ndim == 2:
+			normalized = np.expand_dims(normalized.T, axis=0)
+		else:
+			normalized = np.expand_dims(normalized, axis=0)
+
+		try:
+			sources = apply_model(
+				model,
+				normalized,
+				device="cpu",
+				progress=False,
+				overlap=DEMUCS_OVERLAP,
+			)[0]
+		except Exception as e:
+			LOGGER.error("Chunk %d separation failed: %s", chunk_count, e)
+			raise
+
+		sources = sources * reference_std + reference
+		if sources.ndim == 3:
+			sources = sources[0]
+
+		stems = dict(zip(model.sources, sources))
+		chunk_vocals = stems["vocals"]
+		chunk_accompaniment = sum(audio for name, audio in stems.items() if name != "vocals")
+
+		if separation_intensity != 0.5:
+			intensity = max(0.0, min(1.0, separation_intensity))
+			chunk_vocals = chunk_vocals * intensity + (chunk - chunk_accompaniment) * (1.0 - intensity)
+
+		all_chunks_vocals.append(chunk_vocals)
+		all_chunks_accompaniment.append(chunk_accompaniment)
+		all_chunks_original.append(chunk)
+
+		both_mix = chunk_vocals + chunk_accompaniment
+		peak = float(both_mix.abs().max()) if hasattr(both_mix, "abs") else float(abs(both_mix).max())
+		if peak > 1.0:
+			both_mix = both_mix / peak
+		all_chunks_both.append(both_mix)
+
+		if on_progress:
+			on_progress(min((chunk_count * chunker.chunk_duration) / chunker.total_duration, 1.0))
+
+		gc.collect()
+
+	LOGGER.info("Blending %d chunks...", len(all_chunks_vocals))
+	vocals_blended = all_chunks_vocals[0]
+	accompaniment_blended = all_chunks_accompaniment[0]
+	both_blended = all_chunks_both[0]
+	original_blended = all_chunks_original[0]
+
+	for i in range(1, len(all_chunks_vocals)):
+		vocals_blended = AudioChunker.blend_chunks(vocals_blended, all_chunks_vocals[i], chunker.overlap_frames)
+		accompaniment_blended = AudioChunker.blend_chunks(accompaniment_blended, all_chunks_accompaniment[i], chunker.overlap_frames)
+		both_blended = AudioChunker.blend_chunks(both_blended, all_chunks_both[i], chunker.overlap_frames)
+		original_blended = AudioChunker.blend_chunks(original_blended, all_chunks_original[i], chunker.overlap_frames)
+
+	_save_audio_stem(vocals_blended, model.samplerate, output_dir, "vocals")
+	_save_audio_stem(accompaniment_blended, model.samplerate, output_dir, "accompaniment")
+	_save_audio_stem(both_blended, model.samplerate, output_dir, "both")
+	_save_audio_stem(original_blended, model.samplerate, output_dir, "original")
+
+	LOGGER.info("Chunked separation complete: %d chunks processed and blended", len(all_chunks_vocals))
 
 
 def _save_audio_stem(audio, samplerate: int, output_dir: Path, name: str) -> None:
