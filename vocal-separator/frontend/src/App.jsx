@@ -88,6 +88,55 @@ function App() {
     return false;
   };
 
+  const startWebSocketListener = (currentTaskId) => {
+    window.clearTimeout(pollingRef.current);
+
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProtocol}//${window.location.host}/ws/status/${currentTaskId}`;
+
+    try {
+      const ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        console.log('[WebSocket] Connected for task', currentTaskId);
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        setStatus(data.status);
+        setProgress(data.progress || 0);
+        setStage(data.stage || null);
+
+        if (data.status === 'SUCCESS') {
+          setResults({ vocalsUrl: data.vocals_url, accompanimentUrl: data.accompaniment_url });
+          setLoading(false);
+          ws.close();
+        }
+        if (data.status === 'FAILURE' || data.status === 'FAILED') {
+          setError(data.error || 'Audio processing failed.');
+          setLoading(false);
+          ws.close();
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.error('[WebSocket] Error:', error);
+        setError('Real-time connection failed, falling back to polling...');
+        startPolling(currentTaskId);
+      };
+
+      ws.onclose = () => {
+        console.log('[WebSocket] Disconnected for task', currentTaskId);
+      };
+
+      // Store reference for cleanup
+      pollingRef.current = ws;
+    } catch (err) {
+      console.error('[WebSocket] Connection failed:', err);
+      startPolling(currentTaskId);
+    }
+  };
+
   const startPolling = (currentTaskId) => {
     window.clearTimeout(pollingRef.current);
     const poll = async () => {
@@ -226,7 +275,7 @@ function App() {
             setTaskId(data.task_id);
             setStatus(data.status || 'PENDING');
             setProgress(100);
-            startPolling(data.task_id);
+            startWebSocketListener(data.task_id);
             resolve();
           } catch (e) {
             reject(new Error('Upload failed: Server did not return valid JSON'));
@@ -297,7 +346,7 @@ function App() {
       setFileName(trimmed);
       setTaskId(data.task_id);
       setStatus(data.status || 'PENDING');
-      startPolling(data.task_id);
+      startWebSocketListener(data.task_id);
     } catch (err) {
       setYoutubeError(err.message || 'Could not start extraction from YouTube.');
       setStatus('FAILED');
