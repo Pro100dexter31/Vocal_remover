@@ -1,0 +1,702 @@
+openapi: 3.0.0
+info:
+  title: Vocal Separator API
+  description: |
+    Separate vocals from accompaniment in uploaded audio files, using Demucs for
+    source separation with optional volume normalization, playback-speed
+    adjustment, format conversion, and streaming preview.
+
+    **Processing model**: `/api/upload` queues a Celery background task and
+    returns immediately with a `task_id`. Poll `/api/status/{task_id}` until
+    `status` is `SUCCESS` (or `FAILURE`), then use `task_id` with the
+    download/export/preview endpoints.
+
+    **Speed adjustment model**: `/api/process/{task_id}` queues a *separate*
+    background job and returns a *new* `task_id` for it (distinct from the
+    path `task_id`, which identifies the already-separated source). Poll
+    `/api/status/{that new task_id}` until `SUCCESS`, then download with
+    `/api/download/{original task_id}/{vocals|accompaniment}?speed={speed}`.
+    The original 1.0x stems are never modified — each requested speed is
+    cached and stored alongside them, so multiple speeds can coexist and a
+    repeat request for the same speed returns instantly from cache.
+  version: 1.0.1
+  contact:
+    name: Vocal Separator Team
+    url: https://github.com/vocal-separator
+
+servers:
+  - url: http://localhost:8000
+    description: Local development server (docker compose, port 8000)
+
+tags:
+  - name: Health
+    description: Service health check
+  - name: Upload
+    description: Upload audio and start separation
+  - name: YouTube
+    description: Extract audio from a YouTube video and start separation (Feature 7)
+  - name: Task Status
+    description: Poll background task progress
+  - name: Download
+    description: Download separated audio (original processed format)
+  - name: Waveform
+    description: Downsampled waveform data for before/after visual comparison
+  - name: Export
+    description: Convert separated audio to another format/bitrate on demand
+  - name: Preview
+    description: Stream audio for in-browser playback, with range-request seeking
+  - name: Speed Control
+    description: Playback speed adjustment (0.5x-2.0x, pitch-preserving)
+
+paths:
+  /api/health:
+    get:
+      summary: Health Check
+      tags: [Health]
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: healthy
+                  service:
+                    type: string
+                    example: vocal-separator
+
+  /api/upload:
+    post:
+      summary: Upload Audio File
+      description: |
+        Uploads an audio file and queues it for vocal/accompaniment separation
+        via a Celery background task. Returns immediately (HTTP 202) with a
+        `task_id` — actual separation happens asynchronously; poll
+        `/api/status/{task_id}` for progress.
+      tags: [Upload]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: "Audio file. Allowed extensions: .mp3, .wav, .flac, .ogg, .m4a"
+                separation_intensity:
+                  type: number
+                  format: float
+                  default: 0.5
+                  minimum: 0.0
+                  maximum: 1.0
+                  description: Separation intensity passed to the Demucs task
+                normalize:
+                  type: boolean
+                  default: true
+                  description: Apply volume normalization to the separated stems
+                speed:
+                  type: number
+                  format: float
+                  default: 1.0
+                  enum: [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+                  description: Speed factor forwarded to the separation task
+                normalization_method:
+                  type: string
+                  default: peak
+                  enum: [peak, lufs]
+                  description: "'peak' targets -1 dBFS (safe headroom); 'lufs' targets -14 LUFS (YouTube/Spotify loudness target). Ignored if normalize=false."
+      responses:
+        '202':
+          description: File accepted and queued for background processing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadResponse'
+              example:
+                task_id: "d1bf7974-cb1e-4bbd-948b-7f547567691f"
+                status: PENDING
+                message: Audio uploaded and queued for separation
+        '400':
+          description: Unsupported file extension, or separation_intensity/speed out of range
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDetail'
+        '413':
+          description: File exceeds the configured size limit (default 500 MB)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDetail'
+        '422':
+          description: Missing required `file` field or malformed multipart body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+        '500':
+          description: Server could not queue the processing task
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDetail'
+
+  /api/youtube:
+    post:
+      summary: Extract Audio from YouTube and Start Separation
+      description: |
+        Downloads the audio-only stream from a YouTube video (never the
+        video track), encodes it to 320kbps MP3, then runs it through the
+        exact same separation pipeline as `/api/upload` - same task_id
+        shape, same polling via `/api/status/{task_id}`, same waveform/
+        volume/speed features.
+
+        Video duration is checked from metadata **before** any download
+        starts (max 15 minutes) - an oversized or invalid video is
+        rejected immediately with no Celery job ever queued.
+
+        Progress has two stages, both visible via `/api/status/{task_id}`'s
+        `stage` field: `"downloading"` (0-30%) then `"separating"` (30-100%).
+      tags: [YouTube]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url:
+                  type: string
+                  description: "A youtube.com/watch, youtu.be, or /shorts/ URL. Any other domain is rejected."
+                  example: "https://www.youtube.com/watch?v=y6120QOlsfU"
+                separation_intensity: { type: number, format: float, default: 0.5, minimum: 0.0, maximum: 1.0 }
+                normalize: { type: boolean, default: true }
+                normalization_method: { type: string, enum: [peak, lufs], default: peak }
+                speed: { type: number, format: float, default: 1.0, enum: [0.5, 0.75, 1.0, 1.25, 1.5, 2.0] }
+      responses:
+        '202':
+          description: Video accepted; download and separation queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadResponse'
+              example:
+                task_id: "5819d377-a84d-4d24-9850-1eb8e37ceefd"
+                status: PENDING
+                message: "Downloading 'Darude - Sandstorm' (232s) and queued for separation"
+        '400':
+          description: Not a YouTube URL, video exceeds the 15-minute limit, or invalid processing params
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDetail'
+              examples:
+                not_youtube:
+                  value:
+                    detail: Not a supported YouTube URL
+                too_long:
+                  value:
+                    detail: "Video is 20.0 min long. Maximum allowed: 15 min."
+        '404':
+          description: Video unavailable (private, deleted, geo-restricted, age-restricted, or a livestream)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDetail'
+
+  /api/status/{task_id}:
+    get:
+      summary: Get Processing Status
+      description: |
+        Reads task state directly from Celery's `AsyncResult`. Note: an
+        unknown/nonexistent `task_id` returns HTTP 200 with `status: PENDING`
+        rather than 404 — this is Celery's default behavior for unseen task IDs,
+        not a lookup against a persisted task table.
+      tags: [Task Status]
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Current task status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+              examples:
+                pending:
+                  value:
+                    task_id: "37f60a94-fb76-4cba-aacc-5e708092ebb4"
+                    status: PENDING
+                    progress: 0
+                    vocals_url: null
+                    accompaniment_url: null
+                    error: null
+                processing:
+                  value:
+                    task_id: "37f60a94-fb76-4cba-aacc-5e708092ebb4"
+                    status: PROCESSING
+                    progress: 57
+                    vocals_url: null
+                    accompaniment_url: null
+                    error: null
+                success:
+                  value:
+                    task_id: "37f60a94-fb76-4cba-aacc-5e708092ebb4"
+                    status: SUCCESS
+                    progress: 100
+                    vocals_url: /api/download/37f60a94-fb76-4cba-aacc-5e708092ebb4/vocals
+                    accompaniment_url: /api/download/37f60a94-fb76-4cba-aacc-5e708092ebb4/accompaniment
+                    error: null
+                failure:
+                  value:
+                    task_id: "4fe8943f-4a04-4e89-9d44-74e4b14c3954"
+                    status: FAILURE
+                    progress: 0
+                    vocals_url: null
+                    accompaniment_url: null
+                    error: "Command 'ffprobe ...' returned non-zero exit status 1."
+
+  /api/download/{task_id}/{file_type}:
+    get:
+      summary: Download Separated Audio
+      description: |
+        Downloads a completed stem as an attachment, in whatever format the
+        server produced it in (MP3 by default, controlled by the
+        `AUDIO_OUTPUT_FORMAT` env var, with automatic WAV/MP3 fallback if the
+        primary format is missing on disk).
+      tags: [Download]
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: file_type
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [vocals, accompaniment, both, original]
+          description: "\"both\" is a real vocals+accompaniment mixdown; \"original\" is a compressed copy of the source kept for comparison even though the raw upload is deleted after separation. Neither supports the `speed` param below."
+        - name: speed
+          in: query
+          required: false
+          schema:
+            type: number
+            format: float
+          description: |
+            Optional. When set to a value other than 1.0, downloads the
+            speed-adjusted variant previously produced by
+            `POST /api/process/{task_id}?speed={speed}` instead of the
+            1.0x master. Must match a speed that was already requested and
+            completed via that endpoint, or this returns 404.
+      responses:
+        '200':
+          description: Audio file attachment (master, or the requested speed variant)
+          content:
+            audio/mpeg:
+              schema:
+                type: string
+                format: binary
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: Output not found for this task_id/file_type, or the requested speed variant hasn't been produced yet
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDetail'
+              examples:
+                no_output:
+                  value:
+                    detail: Audio output not found
+                no_speed_variant:
+                  value:
+                    detail: "No 1.5x variant found. Call POST /api/process/37f60a94-fb76-4cba-aacc-5e708092ebb4?speed=1.5 first."
+        '422':
+          description: file_type is not "vocals" or "accompaniment"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+
+  /api/waveform/{task_id}:
+    get:
+      summary: Get Waveform Comparison Data
+      description: |
+        Returns downsampled RMS peaks (800 points, independent of track
+        length) for the original upload, the separated vocals, and the
+        separated accompaniment — for a visual before/after comparison.
+
+        Generated once during separation (before the original upload is
+        deleted) and cached to `waveforms.json` inside the task's output
+        folder; this endpoint just reads that file, so it's only available
+        once the task has reached SUCCESS.
+      tags: [Waveform]
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Waveform peaks for all three tracks
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id: { type: string }
+                  num_points: { type: integer, example: 800 }
+                  original:
+                    type: array
+                    items: { type: number }
+                  vocals:
+                    type: array
+                    items: { type: number }
+                  accompaniment:
+                    type: array
+                    items: { type: number }
+                  both:
+                    type: array
+                    items: { type: number }
+        '404':
+          description: Waveform data not found (still processing, failed, or predates this feature)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDetail'
+
+  /api/export/{task_id}:
+    post:
+      summary: Export with Format Conversion
+      description: |
+        Converts a completed stem to a different format/bitrate on demand.
+        **All parameters are query strings — this endpoint takes no JSON body.**
+        If the requested `output_format` matches the stem's current on-disk
+        format, the source file is returned unchanged (no conversion pass).
+      tags: [Export]
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: file_type
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [vocals, accompaniment]
+        - name: output_format
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [mp3, flac, ogg, wav]
+        - name: bitrate
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [128k, 192k, 320k]
+          description: Only meaningful for lossy formats (mp3/ogg); ignored for flac/wav
+      responses:
+        '200':
+          description: Converted (or passthrough) audio file attachment
+          content:
+            audio/mpeg:
+              schema: { type: string, format: binary }
+            audio/flac:
+              schema: { type: string, format: binary }
+            audio/ogg:
+              schema: { type: string, format: binary }
+            audio/wav:
+              schema: { type: string, format: binary }
+        '400':
+          description: Invalid output_format/bitrate combination raised by the converter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDetail'
+        '404':
+          description: Source stem not found for this task_id/file_type
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDetail'
+              example:
+                detail: Audio file not found
+        '422':
+          description: "Missing required query param, or output_format/bitrate fails its regex (output_format must match ^(mp3|flac|ogg|wav)$, bitrate must match ^(128k|192k|320k)$)"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+        '500':
+          description: Conversion failed, or output file was not created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDetail'
+
+  /api/preview/{task_id}:
+    get:
+      summary: Stream Audio Preview
+      description: |
+        Streams a stem for in-place playback (`inline`, not an attachment).
+        Supports HTTP range requests via the standard `Range` request header
+        for seeking — respond with 206 and `Content-Range`/`Accept-Ranges`
+        headers when a `Range` header is present, otherwise streams the full
+        file with 200.
+
+        `file_type=both` streams a real vocals+accompaniment mixdown
+        (produced alongside the stems, not synthesized on request).
+        `file_type=original` streams a compressed copy of the source track,
+        kept specifically for this comparison even though the raw upload
+        itself is deleted right after separation.
+      tags: [Preview]
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: file_type
+          in: query
+          schema:
+            type: string
+            enum: [vocals, accompaniment, both, original]
+            default: both
+        - name: Range
+          in: header
+          required: false
+          schema:
+            type: string
+            example: "bytes=0-1000"
+          description: Standard HTTP byte-range request for seeking
+      responses:
+        '200':
+          description: Full audio stream (no Range header sent)
+          headers:
+            Accept-Ranges:
+              schema: { type: string, example: bytes }
+            Content-Length:
+              schema: { type: integer }
+          content:
+            audio/mpeg:
+              schema: { type: string, format: binary }
+        '206':
+          description: Partial content for the requested byte range
+          headers:
+            Content-Range:
+              schema: { type: string, example: "bytes 0-1000/5246266" }
+            Content-Length:
+              schema: { type: integer, example: 1001 }
+            Accept-Ranges:
+              schema: { type: string, example: bytes }
+          content:
+            audio/mpeg:
+              schema: { type: string, format: binary }
+        '404':
+          description: Requested stem(s) not found for this task_id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDetail'
+        '416':
+          description: Range header start is beyond file size, or start > end
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDetail'
+        '500':
+          description: Streaming failed unexpectedly
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDetail'
+
+  /api/process/{task_id}:
+    post:
+      summary: Speed Adjustment (playback speed, pitch-preserving)
+      description: |
+        Validates the requested speed, confirms both master stems exist for
+        `task_id`, and (for any speed other than 1.0) queues a Celery job
+        that time-stretches both stems via `librosa.effects.time_stretch`
+        (pitch-preserving) and writes them into a `speed_{speed}/` subfolder
+        next to the masters — the 1.0x masters are never overwritten.
+
+        The `task_id` in the response body is the **new background job's
+        id**, not the path `task_id`. Poll it with `GET /api/status/{that id}`;
+        once `SUCCESS`, fetch the result with
+        `GET /api/download/{path task_id}/{vocals|accompaniment}?speed={speed}`.
+
+        Results are cached by (source file hash, speed, stem): requesting a
+        speed that was already produced for this task returns from cache in
+        well under a second instead of reprocessing.
+      tags: [Speed Control]
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: speed
+          in: query
+          required: false
+          schema:
+            type: number
+            format: float
+            default: 1.0
+            minimum: 0.5
+            maximum: 2.0
+          description: "Must be exactly one of: 0.5, 0.75, 1.0, 1.25, 1.5, 2.0"
+      responses:
+        '200':
+          description: Speed accepted (1.0x returns "completed" immediately; others return "processing")
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SpeedResponse'
+              examples:
+                normal_speed:
+                  value:
+                    status: completed
+                    task_id: "37f60a94-fb76-4cba-aacc-5e708092ebb4"
+                    speed: 1.0
+                    message: "Speed 1.0x (no adjustment needed)"
+                    vocals_url: /api/download/37f60a94-fb76-4cba-aacc-5e708092ebb4/vocals
+                    accompaniment_url: /api/download/37f60a94-fb76-4cba-aacc-5e708092ebb4/accompaniment
+                adjusted_speed:
+                  summary: "speed != 1.0 - a new background job was queued"
+                  value:
+                    status: processing
+                    task_id: "832549e1-91b7-4e0d-9083-6b65c1390367"
+                    source_task_id: "37f60a94-fb76-4cba-aacc-5e708092ebb4"
+                    speed: 1.5
+                    message: "Speed adjustment queued for 1.5x"
+                    estimated_duration_seconds: 437
+        '400':
+          description: speed is not one of the 6 supported values (passes the 0.5-2.0 range but fails the exact-match check)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDetail'
+        '404':
+          description: Task has no vocals/accompaniment output yet — separation must complete first
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorDetail'
+              example:
+                detail: Task output not found. Please complete separation first.
+        '422':
+          description: speed outside the 0.5-2.0 range (fails Query validation before reaching the handler)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+              example:
+                detail:
+                  - type: less_than_equal
+                    loc: [query, speed]
+                    msg: Input should be less than or equal to 2
+                    input: "3.0"
+
+components:
+  schemas:
+    UploadResponse:
+      type: object
+      properties:
+        task_id: { type: string }
+        status: { type: string, enum: [PENDING] }
+        message: { type: string }
+
+    StatusResponse:
+      type: object
+      properties:
+        task_id: { type: string }
+        status:
+          type: string
+          enum: [PENDING, PROCESSING, SUCCESS, FAILURE]
+        progress: { type: integer, minimum: 0, maximum: 100 }
+        vocals_url: { type: string, nullable: true }
+        accompaniment_url: { type: string, nullable: true }
+        error: { type: string, nullable: true }
+        normalization:
+          type: object
+          nullable: true
+          description: Present once SUCCESS, only if normalize=true was requested at upload
+          properties:
+            method: { type: string, enum: [peak, lufs] }
+            vocals:
+              type: object
+              properties:
+                before_db: { type: number, nullable: true }
+                after_db: { type: number, nullable: true }
+            accompaniment:
+              type: object
+              properties:
+                before_db: { type: number, nullable: true }
+                after_db: { type: number, nullable: true }
+        stage:
+          type: string
+          nullable: true
+          enum: [downloading, separating]
+          description: "\"downloading\" only ever appears for /api/youtube-sourced tasks (progress 0-30). \"separating\" appears for both /api/upload and /api/youtube tasks once separation starts."
+
+    SpeedResponse:
+      type: object
+      properties:
+        status: { type: string, enum: [completed, processing] }
+        task_id:
+          type: string
+          description: For status "processing", this is the new background job's id (poll it via /api/status). For "completed" (speed 1.0), this is the original path task_id.
+        source_task_id:
+          type: string
+          nullable: true
+          description: Present only when status is "processing" - the original task_id from the path
+        speed: { type: number, format: float }
+        message: { type: string }
+        vocals_url: { type: string, nullable: true }
+        accompaniment_url: { type: string, nullable: true }
+        estimated_duration_seconds:
+          type: integer
+          description: Rough estimate derived from the source file size (~2x audio duration), only present when status is "processing"
+
+    ErrorDetail:
+      type: object
+      properties:
+        detail:
+          type: string
+
+    ValidationError:
+      description: Standard FastAPI/Pydantic 422 shape
+      type: object
+      properties:
+        detail:
+          type: array
+          items:
+            type: object
+            properties:
+              type: { type: string }
+              loc:
+                type: array
+                items: {}
+              msg: { type: string }
+              input: {}

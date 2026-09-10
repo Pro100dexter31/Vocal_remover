@@ -31,6 +31,7 @@ services:
       REDIS_HOST: redis
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
+      NUMBA_CACHE_DIR: /tmp/numba_cache
     depends_on:
       redis:
         condition: service_healthy
@@ -55,6 +56,7 @@ services:
       REDIS_HOST: redis
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
+      NUMBA_CACHE_DIR: /tmp/numba_cache
     depends_on:
       redis:
         condition: service_healthy
@@ -73,6 +75,26 @@ services:
       - "3001:3000"
     depends_on:
       - backend
+    networks:
+      - vocal-net
+
+  swagger-ui:
+    image: swaggerapi/swagger-ui:latest
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      SWAGGER_JSON: /spec/swagger.yaml
+    volumes:
+      # Directory bind mount (of a small dedicated folder containing only a
+      # symlink to ../../swagger.yaml), not a single-file bind mount: on
+      # Docker Desktop for Mac, a single-file bind mount loses track of the
+      # file the moment an editor replaces it via atomic write+rename (very
+      # common), leaving nginx serving 404s until the container is
+      # recreated. A directory mount survives that. Mounting this narrow
+      # folder - rather than the whole project - keeps outputs/ and other
+      # project files out of this locally-exposed port.
+      - ./swagger-spec:/spec:ro
     networks:
       - vocal-net
 

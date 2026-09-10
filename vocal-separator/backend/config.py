@@ -93,6 +93,13 @@ MP3_BITRATE = os.getenv("MP3_BITRATE", "192k")
 MODEL_IDLE_TIMEOUT_SECONDS = int(os.getenv("MODEL_IDLE_TIMEOUT_SECONDS", "300"))
 
 
+# YouTube audio extraction (Feature 7). Duration is checked from metadata
+# before any download starts, to reject long videos cheaply.
+YOUTUBE_MAX_DURATION_SECONDS = int(os.getenv("YOUTUBE_MAX_DURATION_SECONDS", "900"))
+YOUTUBE_AUDIO_BITRATE_KBPS = int(os.getenv("YOUTUBE_AUDIO_BITRATE_KBPS", "320"))
+YOUTUBE_DOWNLOAD_TIMEOUT_SECONDS = int(os.getenv("YOUTUBE_DOWNLOAD_TIMEOUT_SECONDS", "300"))
+
+
 # Basic application logging; LOG_LEVEL can be changed through .env.
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(

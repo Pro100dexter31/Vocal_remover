@@ -7,6 +7,9 @@ function AudioPreviewPlayer({
   onPlayStop = null,   // Callback when playback stops (for Task 4.4)
   isActive = false,    // Is this player the active one (for Task 4.4)
   previewSpeed = 1.0,  // Speed for preview playback (Task 5.5)
+  onDurationChange = null,  // Reports loaded track duration to parent (for Task 5.4)
+  seekTo = null,  // { time, requestId } - external seek request (for Task 6.3)
+  onTimeUpdate = null,  // Reports live playback position to parent (for waveform playhead)
 }) {
   const [previewType, setPreviewType] = useState('both');
   const [isLoading, setIsLoading] = useState(false);
@@ -28,6 +31,7 @@ function AudioPreviewPlayer({
   }
 
   const previewOptions = [
+    { value: 'original', label: 'Preview Original', emoji: '🎧' },
     { value: 'vocals', label: 'Preview Vocals', emoji: '🎤' },
     { value: 'accompaniment', label: 'Preview Instrumental', emoji: '🎸' },
     { value: 'both', label: 'Preview Both (Mixed)', emoji: '🎵' },
@@ -39,6 +43,13 @@ function AudioPreviewPlayer({
     audioRef.current.playbackRate = previewSpeed;
     setDisplayedSpeed(previewSpeed);
   }, [previewSpeed]);
+
+  // External seek request from WaveformComparison (Task 6.3)
+  useEffect(() => {
+    if (!audioRef.current || !seekTo) return;
+    audioRef.current.currentTime = seekTo.time;
+    setCurrentTime(seekTo.time);
+  }, [seekTo]);
 
   // Setup Web Audio API for waveform visualization
   useEffect(() => {
@@ -223,6 +234,7 @@ function AudioPreviewPlayer({
             setDuration(e.target.duration);
             setPreviewLoaded(true);
             setError('');
+            if (onDurationChange) onDurationChange(e.target.duration);
           }}
           onCanPlay={() => {
             setIsBuffering(false);
@@ -235,7 +247,10 @@ function AudioPreviewPlayer({
           onPause={() => {
             setIsPlaying(false);
           }}
-          onTimeUpdate={(e) => setCurrentTime(e.target.currentTime)}
+          onTimeUpdate={(e) => {
+            setCurrentTime(e.target.currentTime);
+            if (onTimeUpdate) onTimeUpdate(e.target.currentTime);
+          }}
           onWaiting={() => setIsBuffering(true)}
           onPlaying={() => setIsBuffering(false)}
           onEnded={() => {
@@ -278,21 +293,13 @@ function AudioPreviewPlayer({
           {/* Play/Pause Button */}
           <button
             onClick={handlePlayPause}
-            disabled={isLoading || !isActive || isBuffering}
+            disabled={isLoading || isBuffering}
             className={`flex h-12 w-12 items-center justify-center rounded-full text-lg font-bold transition-all ${
-              isActive && !isLoading
-                ? isPlaying
-                  ? 'bg-primary-600 text-white hover:bg-primary-500'
-                  : 'bg-primary-600 text-white hover:bg-primary-500'
+              !isLoading && !isBuffering
+                ? 'bg-primary-600 text-white hover:bg-primary-500'
                 : 'cursor-not-allowed bg-slate-700 text-slate-500 opacity-50'
             }`}
-            title={
-              isLoading || isBuffering
-                ? 'Still buffering...'
-                : isActive
-                  ? 'Play/Pause'
-                  : 'Select this preview to play'
-            }
+            title={isLoading || isBuffering ? 'Still buffering...' : 'Play/Pause'}
           >
             {isLoading || isBuffering ? (
               <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-white" />

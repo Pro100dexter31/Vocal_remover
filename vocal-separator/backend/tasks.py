@@ -2,6 +2,7 @@
 
 import gc
 import logging
+import math
 import os
 import shutil
 import time
@@ -31,10 +32,20 @@ from .config import (
 	OUTPUTS_DIR,
 	RETENTION_HOURS,
 	UPLOADS_DIR,
+	YOUTUBE_AUDIO_BITRATE_KBPS,
+	YOUTUBE_DOWNLOAD_TIMEOUT_SECONDS,
 )
 from .volume_normalizer import normalize_audio_file, NormalizationError
 from .speed_adjuster import adjust_speed, InvalidSpeedError, SpeedProcessingError
 from .speed_cache import SpeedCache
+from .waveform import generate_waveform_peaks, save_waveform_data
+from .youtube_extractor import (
+	download_audio,
+	YouTubeExtractionError,
+	InvalidURLError,
+	VideoTooLongError,
+	VideoUnavailableError,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -130,7 +141,7 @@ def _separate_stems(model, audio_path: Path, output_dir: Path, separation_intens
 	Optimization: Saves output as MP3 (default) instead of WAV for 80% disk savings.
 	"""
 	from demucs.apply import apply_model
-	from demucs.audio import AudioFile, save_audio
+	from demucs.audio import AudioFile
 
 	waveform = AudioFile(str(audio_path)).read(
 		streams=0,
@@ -176,43 +187,67 @@ def _separate_stems(model, audio_path: Path, output_dir: Path, separation_intens
 		# Blend: more intensity = more vocals in final output
 		vocals = vocals * intensity + (waveform - accompaniment) * (1.0 - intensity)
 
-	# Optimization: Save as temporary WAV, then convert to MP3 for compression
-	temp_vocals_wav = output_dir / "vocals_temp.wav"
-	temp_accompaniment_wav = output_dir / "accompaniment_temp.wav"
+	# Real "both" mix = the two downloadable stems summed - reflects any
+	# intensity blending already applied to `vocals` above, unlike just
+	# reusing the pre-separation `waveform`. Clamp in case summing pushes
+	# any sample past full scale.
+	both_mix = vocals + accompaniment
+	peak = float(both_mix.abs().max()) if hasattr(both_mix, "abs") else float(abs(both_mix).max())
+	if peak > 1.0:
+		both_mix = both_mix / peak
 
-	save_audio(vocals, str(temp_vocals_wav), model.samplerate)
-	save_audio(accompaniment, str(temp_accompaniment_wav), model.samplerate)
+	# Feature 6: capture waveform data for all four tracks now, while
+	# everything is in memory - the original upload is deleted right after
+	# this task succeeds, so this is the only chance to sample it.
+	try:
+		def _to_numpy(tensor):
+			return tensor.detach().cpu().numpy() if hasattr(tensor, "detach") else tensor
 
-	# Convert to MP3 if configured (default: yes, saves 80% disk space)
+		waveforms = {
+			"original": generate_waveform_peaks(_to_numpy(waveform)),
+			"vocals": generate_waveform_peaks(_to_numpy(vocals)),
+			"accompaniment": generate_waveform_peaks(_to_numpy(accompaniment)),
+			"both": generate_waveform_peaks(_to_numpy(both_mix)),
+		}
+		save_waveform_data(output_dir, waveforms)
+	except Exception as e:
+		LOGGER.warning("Waveform data generation failed (continuing without it): %s", e)
+
+	_save_audio_stem(vocals, model.samplerate, output_dir, "vocals")
+	_save_audio_stem(accompaniment, model.samplerate, output_dir, "accompaniment")
+	_save_audio_stem(both_mix, model.samplerate, output_dir, "both")
+	_save_audio_stem(waveform, model.samplerate, output_dir, "original")
+
+	LOGGER.info("Outputs saved (%s): vocals, accompaniment, both, original", AUDIO_OUTPUT_FORMAT)
+
+
+def _save_audio_stem(audio, samplerate: int, output_dir: Path, name: str) -> None:
+	"""
+	Save one audio stem to output_dir/{name}.mp3 (falling back to .wav if
+	MP3 conversion fails), via a temporary WAV write + pydub re-encode.
+
+	Optimization: MP3 (default) saves ~80% disk space over WAV.
+	"""
+	from demucs.audio import save_audio
+
+	temp_wav = output_dir / f"{name}_temp.wav"
+	save_audio(audio, str(temp_wav), samplerate)
+
 	if AUDIO_OUTPUT_FORMAT == "mp3":
 		try:
 			from pydub import AudioSegment
 
-			AudioSegment.from_wav(str(temp_vocals_wav)).export(
-				str(output_dir / "vocals.mp3"),
+			AudioSegment.from_wav(str(temp_wav)).export(
+				str(output_dir / f"{name}.mp3"),
 				format="mp3",
 				bitrate=MP3_BITRATE,
 			)
-			AudioSegment.from_wav(str(temp_accompaniment_wav)).export(
-				str(output_dir / "accompaniment.mp3"),
-				format="mp3",
-				bitrate=MP3_BITRATE,
-			)
-
-			# Delete temporary WAV files
-			temp_vocals_wav.unlink(missing_ok=True)
-			temp_accompaniment_wav.unlink(missing_ok=True)
-
-			LOGGER.info("Outputs saved as MP3 (%s bitrate)", MP3_BITRATE)
+			temp_wav.unlink(missing_ok=True)
+			return
 		except Exception as e:
-			# Fallback to WAV if MP3 conversion fails
-			LOGGER.warning("MP3 conversion failed, keeping WAV files: %s", e)
-			temp_vocals_wav.rename(output_dir / "vocals.wav")
-			temp_accompaniment_wav.rename(output_dir / "accompaniment.wav")
-	else:
-		# Keep WAV format if not configured for MP3
-		temp_vocals_wav.rename(output_dir / "vocals.wav")
-		temp_accompaniment_wav.rename(output_dir / "accompaniment.wav")
+			LOGGER.warning("MP3 conversion failed for %s, keeping WAV: %s", name, e)
+
+	temp_wav.rename(output_dir / f"{name}.wav")
 
 
 class CallbackTask(Task):
@@ -236,6 +271,30 @@ def _validate_audio_file(file_path: Path) -> None:
 		raise FileNotFoundError(f"Audio file does not exist: {file_path}")
 	if file_path.suffix.lower() not in ALLOWED_EXTENSIONS:
 		raise ValueError(f"Unsupported audio extension: {file_path.suffix}")
+
+
+def _stretch_to_matching_format(source: Path, target: Path, speed: float) -> None:
+	"""
+	Time-stretch `source` to `speed`, writing the result to `target` in
+	target's own format.
+
+	soundfile (used by adjust_speed) can only write WAV/FLAC/OGG natively,
+	not MP3. When the target is MP3 (or another format soundfile can't
+	write), stretch into a temp WAV first, then re-encode via ffmpeg.
+	"""
+	target_format = target.suffix.lstrip(".").lower()
+	if target_format in ("wav", "flac", "ogg"):
+		adjust_speed(source, target, speed)
+		return
+
+	temp_wav = target.parent / f"{target.stem}_stretch_tmp.wav"
+	try:
+		adjust_speed(source, temp_wav, speed)
+		from .audio_converter import convert_audio
+
+		convert_audio(temp_wav, target, target_format, bitrate=None)
+	finally:
+		temp_wav.unlink(missing_ok=True)
 
 
 def _apply_speed_adjustment(output_dir: Path, speed: float) -> None:
@@ -277,7 +336,7 @@ def _apply_speed_adjustment(output_dir: Path, speed: float) -> None:
 		else:
 			# Adjust vocal speed
 			vocal_output = output_dir / f"{vocal_file.stem}_adjusted{vocal_file.suffix}"
-			adjust_speed(vocal_file, vocal_output, speed)
+			_stretch_to_matching_format(vocal_file, vocal_output, speed)
 			vocal_file.unlink()
 			vocal_output.rename(vocal_file)
 			# Cache result
@@ -292,7 +351,7 @@ def _apply_speed_adjustment(output_dir: Path, speed: float) -> None:
 		else:
 			# Adjust accompaniment speed
 			accompaniment_output = output_dir / f"{accompaniment_file.stem}_adjusted{accompaniment_file.suffix}"
-			adjust_speed(accompaniment_file, accompaniment_output, speed)
+			_stretch_to_matching_format(accompaniment_file, accompaniment_output, speed)
 			accompaniment_file.unlink()
 			accompaniment_output.rename(accompaniment_file)
 			# Cache result
@@ -304,15 +363,88 @@ def _apply_speed_adjustment(output_dir: Path, speed: float) -> None:
 		raise SpeedProcessingError(f"Failed to adjust speed in {output_dir}: {str(e)}")
 
 
-def _apply_normalization(output_dir: Path) -> None:
+def _produce_speed_variant(output_dir: Path, speed: float, on_progress=None) -> dict[str, Path]:
+	"""
+	Produce speed-adjusted copies of the master stems without mutating them.
+
+	Unlike _apply_speed_adjustment (used at upload time, which rewrites the
+	stems in place), this reads from the canonical vocals.*/accompaniment.*
+	files and writes the result into a dedicated subfolder, so the master
+	stems stay at their original speed and repeated calls for different
+	speeds never stack on top of each other.
+
+	Args:
+		output_dir: Directory containing the master vocal/accompaniment files
+		speed: Speed factor (0.5-2.0, excluding 1.0)
+		on_progress: Optional callback(fraction: float) for progress reporting
+
+	Returns:
+		Dict with "vocals" and "accompaniment" Paths to the adjusted files
+
+	Raises:
+		FileNotFoundError: If master stems are missing
+		SpeedProcessingError: If speed adjustment fails
+	"""
+	cache = get_speed_cache()
+
+	vocal_files = list(output_dir.glob("vocals.*"))
+	accompaniment_files = list(output_dir.glob("accompaniment.*"))
+	if not vocal_files or not accompaniment_files:
+		raise FileNotFoundError(f"Master stems not found in {output_dir}")
+
+	vocal_master = vocal_files[0]
+	accompaniment_master = accompaniment_files[0]
+
+	variant_dir = output_dir / f"speed_{speed}"
+	variant_dir.mkdir(parents=True, exist_ok=True)
+
+	result: dict[str, Path] = {}
+	try:
+		for label, master in (("vocals", vocal_master), ("accompaniment", accompaniment_master)):
+			target = variant_dir / f"{label}{master.suffix}"
+
+			cached = cache.get_cached_file(master, speed, label)
+			if cached:
+				if cached.resolve() != target.resolve():
+					shutil.copy2(cached, target)
+			else:
+				_stretch_to_matching_format(master, target, speed)
+				cache.cache_file(master, speed, label, target, {})
+
+			result[label] = target
+			if on_progress:
+				on_progress(0.5 if label == "vocals" else 1.0)
+
+		LOGGER.info("Speed variant %sx produced for %s", speed, output_dir)
+		return result
+
+	except Exception as e:
+		raise SpeedProcessingError(f"Failed to produce {speed}x variant in {output_dir}: {str(e)}")
+
+
+def _safe_db(value: float) -> float | None:
+	"""Clamp -inf/+inf/NaN loudness readings to a JSON-safe finite value."""
+	if value is None or math.isnan(value):
+		return None
+	if math.isinf(value):
+		return -100.0 if value < 0 else 0.0
+	return round(float(value), 2)
+
+
+def _apply_normalization(output_dir: Path, method: str = "peak") -> dict[str, Any] | None:
 	"""
 	Apply volume normalization to separated stems.
 
-	Normalizes both vocals and accompaniment to -1dB peak level
-	to prevent clipping and ensure consistent loudness.
+	Normalizes both vocals and accompaniment either to -1dB peak level
+	("peak", default) or to -14 LUFS ("lufs", the YouTube loudness target).
 
 	Args:
 		output_dir: Directory containing vocal and accompaniment files
+		method: "peak" or "lufs"
+
+	Returns:
+		Dict with before/after loudness (dB or LUFS) for each stem, or None
+		if stems were not found.
 
 	Raises:
 		NormalizationError: If normalization fails
@@ -325,7 +457,7 @@ def _apply_normalization(output_dir: Path) -> None:
 
 	if not vocal_files or not accompaniment_files:
 		LOGGER.warning("Could not find stems to normalize")
-		return
+		return None
 
 	vocal_file = vocal_files[0]
 	accompaniment_file = accompaniment_files[0]
@@ -334,21 +466,27 @@ def _apply_normalization(output_dir: Path) -> None:
 	vocal_normalized = output_dir / f"{vocal_file.stem}_norm{vocal_file.suffix}"
 	accompaniment_normalized = output_dir / f"{accompaniment_file.stem}_norm{accompaniment_file.suffix}"
 
+	before_key, after_key = (
+		("before_lufs", "after_lufs") if method == "lufs" else ("before_peak_dbfs", "after_peak_dbfs")
+	)
+
 	try:
 		# Normalize vocal track
-		normalize_audio_file(
+		vocal_result = normalize_audio_file(
 			vocal_file,
 			vocal_normalized,
-			method="peak",
-			target_peak_dbfs=-1.0
+			method=method,
+			target_peak_dbfs=-1.0,
+			target_lufs=-14.0,
 		)
 
 		# Normalize accompaniment track
-		normalize_audio_file(
+		accompaniment_result = normalize_audio_file(
 			accompaniment_file,
 			accompaniment_normalized,
-			method="peak",
-			target_peak_dbfs=-1.0
+			method=method,
+			target_peak_dbfs=-1.0,
+			target_lufs=-14.0,
 		)
 
 		# Replace original files with normalized versions
@@ -357,7 +495,19 @@ def _apply_normalization(output_dir: Path) -> None:
 		vocal_normalized.rename(vocal_file)
 		accompaniment_normalized.rename(accompaniment_file)
 
-		LOGGER.info("Volume normalization completed for task in %s", output_dir)
+		LOGGER.info("Volume normalization completed for task in %s (method: %s)", output_dir, method)
+
+		return {
+			"method": method,
+			"vocals": {
+				"before_db": _safe_db(vocal_result[before_key]),
+				"after_db": _safe_db(vocal_result[after_key]),
+			},
+			"accompaniment": {
+				"before_db": _safe_db(accompaniment_result[before_key]),
+				"after_db": _safe_db(accompaniment_result[after_key]),
+			},
+		}
 
 	except Exception as e:
 		# Clean up temporary files if normalization failed
@@ -366,82 +516,127 @@ def _apply_normalization(output_dir: Path) -> None:
 		raise NormalizationError(f"Failed to normalize audio in {output_dir}: {str(e)}")
 
 
+def _run_separation_pipeline(
+	self,
+	task_id: str,
+	audio_path: Path,
+	output_dir: Path,
+	separation_intensity: float,
+	normalize: bool,
+	speed: float,
+	normalization_method: str,
+	progress_start: int = 10,
+	progress_end: int = 95,
+) -> dict[str, Any]:
+	"""
+	Demucs separation + normalization + speed adjustment, shared by both the
+	direct-upload task and the YouTube task so the two never drift apart.
+
+	Reports progress scaled into [progress_start, progress_end] (e.g. an
+	upload uses the whole 10-95 range, while a YouTube job reserves 0-30
+	for the download stage and gives this only 30-95).
+	"""
+	span = progress_end - progress_start
+
+	def pct(fraction: float) -> int:
+		return progress_start + int(span * fraction)
+
+	def set_progress(fraction: float) -> None:
+		self.update_state(
+			state="PROCESSING",
+			meta={"stage": "separating", "progress": pct(fraction), "task_id": task_id},
+		)
+
+	set_progress(0.0)
+	_validate_audio_file(audio_path)
+
+	output_dir.mkdir(parents=True, exist_ok=True)
+	set_progress(0.1)
+
+	separator = get_or_create_separator()
+	set_progress(0.2)
+
+	def report(fraction: float) -> None:
+		set_progress(0.2 + 0.6 * fraction)
+
+	_separate_stems(separator, audio_path, output_dir, separation_intensity=separation_intensity, on_progress=report)
+
+	# Apply volume normalization if enabled
+	normalization_result = None
+	if normalize:
+		set_progress(0.92)
+		try:
+			normalization_result = _apply_normalization(output_dir, method=normalization_method)
+			LOGGER.info("Volume normalization applied to stems (method: %s)", normalization_method)
+		except NormalizationError as e:
+			LOGGER.warning("Volume normalization failed (continuing without it): %s", e)
+			# Continue without normalization rather than failing the entire task
+
+	# Apply speed adjustment if not 1.0x
+	if speed != 1.0:
+		set_progress(0.94)
+		try:
+			_apply_speed_adjustment(output_dir, speed)
+			LOGGER.info("Speed adjustment applied to stems (speed: %sx)", speed)
+		except (InvalidSpeedError, SpeedProcessingError) as e:
+			LOGGER.warning("Speed adjustment failed (continuing without it): %s", e)
+			# Continue without speed adjustment rather than failing the entire task
+
+	# Verify output files (check for both WAV and MP3)
+	has_vocals = (output_dir / "vocals.mp3").is_file() or (output_dir / "vocals.wav").is_file()
+	has_accompaniment = (output_dir / "accompaniment.mp3").is_file() or (output_dir / "accompaniment.wav").is_file()
+	if not (has_vocals and has_accompaniment):
+		raise FileNotFoundError("Demucs did not produce both expected stems")
+	set_progress(0.99)
+
+	return {
+		"task_id": task_id,
+		"status": "SUCCESS",
+		"stage": "separating",
+		"progress": progress_end,
+		"vocals_url": f"/api/download/{task_id}/vocals",
+		"accompaniment_url": f"/api/download/{task_id}/accompaniment",
+		"normalization": normalization_result,
+	}
+
+
 @celery_app.task(
 	bind=True,
 	base=CallbackTask,
 	name="backend.tasks.process_audio_task",
 	max_retries=2,
 )
-def process_audio_task(self, task_id: str, file_path: str, separation_intensity: float = 0.5, normalize: bool = True, speed: float = 1.0) -> dict[str, Any]:
+def process_audio_task(
+	self,
+	task_id: str,
+	file_path: str,
+	separation_intensity: float = 0.5,
+	normalize: bool = True,
+	speed: float = 1.0,
+	normalization_method: str = "peak",
+) -> dict[str, Any]:
 	"""Separate one uploaded file into vocals and accompaniment WAV files.
 
 	Args:
 		separation_intensity: Vocal emphasis (0.0-1.0, default 0.5 for balanced)
 		normalize: Apply volume normalization after separation (default: True)
 		speed: Speed adjustment factor (0.5-2.0, default 1.0 for no change)
+		normalization_method: "peak" (-1dBFS) or "lufs" (-14 LUFS, YouTube target)
 	"""
 	output_dir = OUTPUTS_DIR / task_id
+	audio_path = Path(file_path).resolve()
 	try:
-		self.update_state(state="PROCESSING", meta={"progress": 10, "task_id": task_id})
-		audio_path = Path(file_path).resolve()
-		_validate_audio_file(audio_path)
-
-		output_dir.mkdir(parents=True, exist_ok=True)
-		self.update_state(state="PROCESSING", meta={"progress": 20, "task_id": task_id})
-
-		separator = get_or_create_separator()
-		self.update_state(state="PROCESSING", meta={"progress": 30, "task_id": task_id})
-
-		def report(fraction: float) -> None:
-			self.update_state(
-				state="PROCESSING",
-				meta={"progress": 30 + int(60 * fraction), "task_id": task_id},
-			)
-
-		_separate_stems(separator, audio_path, output_dir, separation_intensity=separation_intensity, on_progress=report)
-
-		# Apply volume normalization if enabled
-		if normalize:
-			self.update_state(state="PROCESSING", meta={"progress": 92, "task_id": task_id})
-			try:
-				_apply_normalization(output_dir)
-				LOGGER.info("Volume normalization applied to stems")
-			except NormalizationError as e:
-				LOGGER.warning("Volume normalization failed (continuing without it): %s", e)
-				# Continue without normalization rather than failing the entire task
-
-		# Apply speed adjustment if not 1.0x
-		if speed != 1.0:
-			self.update_state(state="PROCESSING", meta={"progress": 93, "task_id": task_id})
-			try:
-				_apply_speed_adjustment(output_dir, speed)
-				LOGGER.info("Speed adjustment applied to stems (speed: %sx)", speed)
-			except (InvalidSpeedError, SpeedProcessingError) as e:
-				LOGGER.warning("Speed adjustment failed (continuing without it): %s", e)
-				# Continue without speed adjustment rather than failing the entire task
-
-		# Verify output files (check for both WAV and MP3)
-		has_vocals = (output_dir / "vocals.mp3").is_file() or (
-			output_dir / "vocals.wav"
-		).is_file()
-		has_accompaniment = (output_dir / "accompaniment.mp3").is_file() or (
-			output_dir / "accompaniment.wav"
-		).is_file()
-		if not (has_vocals and has_accompaniment):
-			raise FileNotFoundError("Demucs did not produce both expected stems")
-		self.update_state(state="PROCESSING", meta={"progress": 95, "task_id": task_id})
+		result = _run_separation_pipeline(
+			self, task_id, audio_path, output_dir,
+			separation_intensity, normalize, speed, normalization_method,
+			progress_start=10, progress_end=95,
+		)
 
 		# Optimization: Delete upload immediately after successful processing (save 300 MB)
 		audio_path.unlink(missing_ok=True)
 		LOGGER.info("Optimization: Upload deleted immediately (freed ~300 MB)")
 
-		result = {
-			"task_id": task_id,
-			"status": "SUCCESS",
-			"progress": 100,
-			"vocals_url": f"/api/download/{task_id}/vocals",
-			"accompaniment_url": f"/api/download/{task_id}/accompaniment",
-		}
+		result["progress"] = 100
 		self.update_state(state="SUCCESS", meta=result)
 
 		# Optimization: Force garbage collection (save ~50-100 MB per 100 tasks)
@@ -457,6 +652,142 @@ def process_audio_task(self, task_id: str, file_path: str, separation_intensity:
 	finally:
 		# Optimization: Force garbage collection even on error
 		gc.collect()
+
+
+@celery_app.task(
+	bind=True,
+	base=CallbackTask,
+	name="backend.tasks.process_youtube_task",
+	max_retries=1,
+)
+def process_youtube_task(
+	self,
+	task_id: str,
+	url: str,
+	separation_intensity: float = 0.5,
+	normalize: bool = True,
+	speed: float = 1.0,
+	normalization_method: str = "peak",
+) -> dict[str, Any]:
+	"""Download audio from a YouTube URL, then run it through the same
+	separation pipeline as a direct upload (Feature 7).
+
+	Progress is reported in two stages: 0-30% while downloading, 30-95%
+	while separating (see _run_separation_pipeline), matching the two-stage
+	UI in the frontend.
+	"""
+	output_dir = OUTPUTS_DIR / task_id
+	download_dir = UPLOADS_DIR / f"yt_{task_id}"
+	downloaded_path: Path | None = None
+	try:
+		self.update_state(state="PROCESSING", meta={"stage": "downloading", "progress": 0, "task_id": task_id})
+
+		# yt-dlp's progress hook fires from the download worker thread, which
+		# has no Celery task context - so it can only write to a shared
+		# holder. Only the main thread (polling below) is allowed to call
+		# self.update_state, matching the pattern _separate_stems uses for
+		# Demucs progress.
+		progress_holder = {"fraction": 0.0}
+
+		def dl_progress(fraction: float) -> None:
+			progress_holder["fraction"] = fraction
+
+		def _download_with_timeout() -> Path:
+			with ThreadPoolExecutor(max_workers=1) as pool:
+				future = pool.submit(
+					download_audio, url, download_dir, YOUTUBE_AUDIO_BITRATE_KBPS, dl_progress
+				)
+				started = time.monotonic()
+				while not future.done():
+					if time.monotonic() - started > YOUTUBE_DOWNLOAD_TIMEOUT_SECONDS:
+						raise TimeoutError(f"Download exceeded {YOUTUBE_DOWNLOAD_TIMEOUT_SECONDS}s")
+					self.update_state(
+						state="PROCESSING",
+						meta={
+							"stage": "downloading",
+							"progress": int(30 * progress_holder["fraction"]),
+							"task_id": task_id,
+						},
+					)
+					time.sleep(1)
+				return future.result()
+
+		downloaded_path = _download_with_timeout()
+
+		result = _run_separation_pipeline(
+			self, task_id, downloaded_path, output_dir,
+			separation_intensity, normalize, speed, normalization_method,
+			progress_start=30, progress_end=95,
+		)
+
+		downloaded_path.unlink(missing_ok=True)
+		shutil.rmtree(download_dir, ignore_errors=True)
+		LOGGER.info("YouTube source audio deleted after successful separation")
+
+		result["progress"] = 100
+		self.update_state(state="SUCCESS", meta=result)
+
+		gc.collect()
+		return result
+
+	except (InvalidURLError, VideoTooLongError, VideoUnavailableError, YouTubeExtractionError) as exc:
+		# Not transient - retrying won't help a bad URL or a too-long video.
+		LOGGER.warning("YouTube extraction failed for task %s: %s", task_id, exc)
+		raise
+	except TimeoutError as exc:
+		LOGGER.warning("YouTube download timed out for task %s after %ss", task_id, YOUTUBE_DOWNLOAD_TIMEOUT_SECONDS)
+		raise YouTubeExtractionError(
+			f"Download timed out after {YOUTUBE_DOWNLOAD_TIMEOUT_SECONDS}s"
+		) from exc
+	except Exception as exc:
+		LOGGER.exception("YouTube processing failed for task %s", task_id)
+		if self.request.retries < self.max_retries:
+			raise self.retry(exc=exc, countdown=5)
+		raise
+	finally:
+		if downloaded_path is not None:
+			downloaded_path.unlink(missing_ok=True)
+		shutil.rmtree(download_dir, ignore_errors=True)
+		gc.collect()
+
+
+@celery_app.task(
+	bind=True,
+	base=CallbackTask,
+	name="backend.tasks.apply_speed_task",
+	max_retries=1,
+)
+def apply_speed_task(self, source_task_id: str, speed: float) -> dict[str, Any]:
+	"""Produce a speed-adjusted copy of a completed task's stems.
+
+	Reads the already-separated master stems for source_task_id and writes
+	pitch-preserving time-stretched copies at the requested speed, without
+	touching the master files (see _produce_speed_variant).
+	"""
+	output_dir = OUTPUTS_DIR / source_task_id
+	try:
+		self.update_state(state="PROCESSING", meta={"progress": 5})
+
+		def report(fraction: float) -> None:
+			self.update_state(state="PROCESSING", meta={"progress": 5 + int(90 * fraction)})
+
+		_produce_speed_variant(output_dir, speed, on_progress=report)
+
+		result = {
+			"status": "SUCCESS",
+			"progress": 100,
+			"source_task_id": source_task_id,
+			"speed": speed,
+			"vocals_url": f"/api/download/{source_task_id}/vocals?speed={speed}",
+			"accompaniment_url": f"/api/download/{source_task_id}/accompaniment?speed={speed}",
+		}
+		self.update_state(state="SUCCESS", meta=result)
+		return result
+	except Exception as exc:
+		LOGGER.exception("Speed variant task failed for %s at %sx", source_task_id, speed)
+		if self.request.retries < self.max_retries:
+			raise self.retry(exc=exc, countdown=3)
+		raise
 
 
 @celery_app.task(name="backend.tasks.ping_task")

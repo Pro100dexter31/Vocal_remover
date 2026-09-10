@@ -1,0 +1,4 @@
+# Test-only dependencies, installed on top of requirements.txt in the image
+# so `pytest backend/test_*.py` works out of the box without ad-hoc pip installs.
+pytest==8.3.3
+pytest-mock==3.14.0

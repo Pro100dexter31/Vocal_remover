@@ -51,9 +51,9 @@ class TestQualityAndStability:
                 output_path = Path(tmpdir) / f"test_{speed}x.wav"
                 adjust_speed(test_audio_5min, output_path, speed)
 
-                y_adjusted, _ = librosa.load(output_path, sr=None)
+                y_adjusted, sr_adjusted = librosa.load(output_path, sr=None)
                 centroid_adjusted = librosa.feature.spectral_centroid(
-                    y=y_adjusted, sr=None
+                    y=y_adjusted, sr=sr_adjusted
                 ).mean()
 
                 # Pitch should be preserved (within 10% tolerance)
@@ -178,24 +178,27 @@ class TestSpectralContent:
     """Test that spectral content is preserved (pitch invariance)."""
 
     def test_spectral_centroid_preservation(self, test_audio_5min):
-        """Verify spectral centroid is preserved across speeds."""
+        """Verify mean spectral centroid is preserved across speeds.
+
+        Adjusted audio has a different duration (and so a different number
+        of STFT frames) than the original, so centroids must be compared as
+        single mean values, not element-wise across the full time series.
+        """
         y_original, sr = librosa.load(test_audio_5min, sr=None)
-        stft_original = np.abs(librosa.stft(y_original))
-        centroid_original = librosa.feature.spectral_centroid(y=y_original, sr=sr)
+        centroid_original = librosa.feature.spectral_centroid(y=y_original, sr=sr).mean()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             for speed in [0.5, 1.5, 2.0]:
                 output_path = Path(tmpdir) / f"test_{speed}x.wav"
                 adjust_speed(test_audio_5min, output_path, speed)
 
-                y_adjusted, _ = librosa.load(output_path, sr=None)
-                stft_adjusted = np.abs(librosa.stft(y_adjusted))
+                y_adjusted, sr_adjusted = librosa.load(output_path, sr=None)
                 centroid_adjusted = librosa.feature.spectral_centroid(
-                    y=y_adjusted, sr=sr
-                )
+                    y=y_adjusted, sr=sr_adjusted
+                ).mean()
 
                 # Centroids should be similar
-                mean_ratio = np.mean(centroid_adjusted / centroid_original)
+                mean_ratio = centroid_adjusted / centroid_original
                 assert (
                     0.85 < mean_ratio < 1.15
                 ), f"Spectral shift at {speed}x: {mean_ratio}"

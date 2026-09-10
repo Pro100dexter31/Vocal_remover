@@ -8,7 +8,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from celery.result import AsyncResult
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -27,8 +27,16 @@ from .config import (
 	OUTPUTS_DIR,
 	UPLOADS_DIR,
 )
-from .tasks import celery_app, process_audio_task
+from .tasks import celery_app, process_audio_task, apply_speed_task, process_youtube_task
 from .speed_adjuster import SUPPORTED_SPEEDS
+from .waveform import load_waveform_data
+from .youtube_extractor import (
+	fetch_video_metadata,
+	validate_youtube_url,
+	InvalidURLError,
+	VideoTooLongError,
+	VideoUnavailableError,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -47,6 +55,8 @@ class StatusResponse(BaseModel):
 	vocals_url: str | None = None
 	accompaniment_url: str | None = None
 	error: str | None = None
+	normalization: dict[str, Any] | None = None
+	stage: str | None = None
 
 
 def _status_payload(task_id: str, result: AsyncResult) -> dict[str, Any]:
@@ -59,6 +69,8 @@ def _status_payload(task_id: str, result: AsyncResult) -> dict[str, Any]:
 		"vocals_url": info.get("vocals_url"),
 		"accompaniment_url": info.get("accompaniment_url"),
 		"error": info.get("error"),
+		"normalization": info.get("normalization"),
+		"stage": info.get("stage"),
 	}
 	if state == "SUCCESS":
 		payload["progress"] = 100
@@ -104,12 +116,35 @@ async def health_check() -> dict[str, str]:
 	return {"status": "healthy", "service": "vocal-separator"}
 
 
+SUPPORTED_SPEED_VALUES = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+
+
+def _validate_processing_params(separation_intensity: float, speed: float, normalization_method: str) -> None:
+	"""Shared validation for /api/upload and /api/youtube."""
+	if not 0.0 <= separation_intensity <= 1.0:
+		raise HTTPException(
+			status_code=400,
+			detail="separation_intensity must be between 0.0 and 1.0",
+		)
+	if normalization_method not in ("peak", "lufs"):
+		raise HTTPException(
+			status_code=400,
+			detail="normalization_method must be 'peak' or 'lufs'",
+		)
+	if speed not in SUPPORTED_SPEED_VALUES:
+		raise HTTPException(
+			status_code=400,
+			detail=f"Speed must be one of: {', '.join(f'{s}x' for s in SUPPORTED_SPEED_VALUES)}",
+		)
+
+
 @app.post("/api/upload", response_model=UploadResponse, status_code=status.HTTP_202_ACCEPTED)
 async def upload_audio(
 	file: UploadFile = File(...),
-	separation_intensity: float = 0.5,
-	normalize: bool = True,
-	speed: float = 1.0,
+	separation_intensity: float = Form(0.5),
+	normalize: bool = Form(True),
+	speed: float = Form(1.0),
+	normalization_method: str = Form("peak"),
 ) -> UploadResponse:
 	filename = Path(file.filename or "").name
 	extension = Path(filename).suffix.lower()
@@ -119,20 +154,7 @@ async def upload_audio(
 			detail=f"Unsupported file type. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
 		)
 
-	# Validate separation_intensity is in valid range
-	if not 0.0 <= separation_intensity <= 1.0:
-		raise HTTPException(
-			status_code=400,
-			detail="separation_intensity must be between 0.0 and 1.0",
-		)
-
-	# Validate speed is in valid range
-	supported_speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
-	if speed not in supported_speeds:
-		raise HTTPException(
-			status_code=400,
-			detail=f"Speed must be one of: {', '.join(f'{s}x' for s in supported_speeds)}",
-		)
+	_validate_processing_params(separation_intensity, speed, normalization_method)
 
 	task_id = str(uuid4())
 	destination = UPLOADS_DIR / f"{task_id}_{filename}"
@@ -145,7 +167,10 @@ async def upload_audio(
 					raise HTTPException(status_code=413, detail="File exceeds the 500 MB limit")
 				output_file.write(chunk)
 		await file.close()
-		process_audio_task.apply_async(args=[task_id, str(destination), separation_intensity, normalize, speed], task_id=task_id)
+		process_audio_task.apply_async(
+			args=[task_id, str(destination), separation_intensity, normalize, speed, normalization_method],
+			task_id=task_id,
+		)
 	except HTTPException:
 		destination.unlink(missing_ok=True)
 		raise
@@ -161,6 +186,56 @@ async def upload_audio(
 	)
 
 
+class YouTubeRequest(BaseModel):
+	url: str
+	separation_intensity: float = 0.5
+	normalize: bool = True
+	speed: float = 1.0
+	normalization_method: str = "peak"
+
+
+@app.post("/api/youtube", response_model=UploadResponse, status_code=status.HTTP_202_ACCEPTED)
+async def process_youtube_url(payload: YouTubeRequest) -> UploadResponse:
+	"""
+	Extract audio from a YouTube video and queue it for separation
+	(Feature 7). Metadata (title/duration) is fetched synchronously so a
+	too-long or invalid video is rejected immediately, before any Celery
+	job or download starts.
+	"""
+	_validate_processing_params(payload.separation_intensity, payload.speed, payload.normalization_method)
+
+	if not validate_youtube_url(payload.url):
+		raise HTTPException(status_code=400, detail="Not a supported YouTube URL")
+
+	try:
+		metadata = fetch_video_metadata(payload.url)
+	except InvalidURLError as e:
+		raise HTTPException(status_code=400, detail=str(e)) from e
+	except VideoTooLongError as e:
+		raise HTTPException(status_code=400, detail=str(e)) from e
+	except VideoUnavailableError as e:
+		raise HTTPException(status_code=404, detail=str(e)) from e
+
+	task_id = str(uuid4())
+	process_youtube_task.apply_async(
+		args=[
+			task_id,
+			payload.url,
+			payload.separation_intensity,
+			payload.normalize,
+			payload.speed,
+			payload.normalization_method,
+		],
+		task_id=task_id,
+	)
+
+	return UploadResponse(
+		task_id=task_id,
+		status="PENDING",
+		message=f"Downloading '{metadata['title']}' ({metadata['duration_seconds']}s) and queued for separation",
+	)
+
+
 @app.get("/api/status/{task_id}", response_model=StatusResponse)
 async def task_status(task_id: str) -> StatusResponse:
 	result = AsyncResult(task_id, app=celery_app)
@@ -170,8 +245,29 @@ async def task_status(task_id: str) -> StatusResponse:
 @app.get("/api/download/{task_id}/{file_type}")
 async def download_audio(
 	task_id: str,
-	file_type: Literal["vocals", "accompaniment"],
+	file_type: Literal["vocals", "accompaniment", "both", "original"],
+	speed: float | None = Query(None, description="Optional speed variant produced via /api/process (vocals/accompaniment only)"),
 ) -> FileResponse:
+	# Speed-adjusted variant: look inside the dedicated speed_{speed} subfolder
+	# produced by apply_speed_task, instead of the master stems.
+	if speed is not None and speed != 1.0:
+		variant_dir = OUTPUTS_DIR / task_id / f"speed_{speed}"
+		matches = list(variant_dir.glob(f"{file_type}.*"))
+		if not matches:
+			raise HTTPException(
+				status_code=404,
+				detail=f"No {speed}x variant found. Call POST /api/process/{task_id}?speed={speed} first.",
+			)
+		file_path = matches[0]
+		media_type = _get_media_type(file_path.suffix.lstrip("."))
+		filename = f"{file_type}_{speed}x{file_path.suffix}"
+		return FileResponse(
+			path=file_path,
+			media_type=media_type,
+			filename=filename,
+			headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+		)
+
 	# Optimization: Try MP3 first (smaller files), fallback to WAV for backward compatibility
 	if AUDIO_OUTPUT_FORMAT == "mp3":
 		file_path = OUTPUTS_DIR / task_id / f"{file_type}.mp3"
@@ -199,6 +295,29 @@ async def download_audio(
 		filename=filename,
 		headers={"Content-Disposition": f'attachment; filename="{filename}"'},
 	)
+
+
+@app.get("/api/waveform/{task_id}")
+async def get_waveform(task_id: str) -> dict[str, Any]:
+	"""
+	Return downsampled waveform peaks for the original upload plus both
+	separated stems, for the before/after comparison view.
+
+	Generated once during separation and cached to waveforms.json inside
+	the task's output folder; this endpoint just reads that file.
+
+	Raises:
+		HTTPException 404: If the task has no waveform data (still processing,
+			failed, or predates this feature)
+	"""
+	data = load_waveform_data(OUTPUTS_DIR / task_id)
+	if data is None:
+		raise HTTPException(
+			status_code=404,
+			detail="Waveform data not found for this task. It may still be processing, "
+			"or was separated before waveform comparison was added.",
+		)
+	return {"task_id": task_id, **data}
 
 
 @app.post("/api/export/{task_id}")
@@ -373,7 +492,7 @@ async def _stream_audio_file(file_path: Path, range_header: str | None = None):
 @app.get("/api/preview/{task_id}")
 async def preview_audio(
 	task_id: str,
-	file_type: Literal["vocals", "accompaniment", "both"] = "both",
+	file_type: Literal["vocals", "accompaniment", "both", "original"] = "both",
 	request: Request = None,
 ) -> StreamingResponse:
 	"""
@@ -383,7 +502,10 @@ async def preview_audio(
 
 	Args:
 		task_id: ID of the processed task
-		file_type: "vocals", "accompaniment", or "both"
+		file_type: "vocals", "accompaniment", "both" (a real vocals+accompaniment
+			mixdown, produced alongside the stems), or "original" (the source
+			track, kept as a compressed copy for comparison even though the
+			raw upload itself is deleted after separation)
 		request: HTTP request object
 
 	Returns:
@@ -396,42 +518,19 @@ async def preview_audio(
 	try:
 		# Determine source file format
 		source_format = AUDIO_OUTPUT_FORMAT if AUDIO_OUTPUT_FORMAT in ("mp3", "wav") else "wav"
+		alt_format = "wav" if source_format == "mp3" else "mp3"
 
-		# Get file paths
-		vocals_path = OUTPUTS_DIR / task_id / f"vocals.{source_format}"
-		accompaniment_path = OUTPUTS_DIR / task_id / f"accompaniment.{source_format}"
+		def _resolve(name: str) -> Path | None:
+			path = OUTPUTS_DIR / task_id / f"{name}.{source_format}"
+			if path.exists():
+				return path
+			alt_path = OUTPUTS_DIR / task_id / f"{name}.{alt_format}"
+			return alt_path if alt_path.exists() else None
 
-		# Fallback: check other format if not found
-		if not vocals_path.exists():
-			alt_format = "wav" if source_format == "mp3" else "mp3"
-			alt_vocals = OUTPUTS_DIR / task_id / f"vocals.{alt_format}"
-			if alt_vocals.exists():
-				vocals_path = alt_vocals
-
-		if not accompaniment_path.exists():
-			alt_format = "wav" if source_format == "mp3" else "mp3"
-			alt_accompaniment = OUTPUTS_DIR / task_id / f"accompaniment.{alt_format}"
-			if alt_accompaniment.exists():
-				accompaniment_path = alt_accompaniment
-
-		# Determine which file(s) to stream
-		if file_type == "vocals":
-			if not vocals_path.exists():
-				raise HTTPException(status_code=404, detail="Vocal track not found")
-			stream_path = vocals_path
-			filename = "vocals"
-		elif file_type == "accompaniment":
-			if not accompaniment_path.exists():
-				raise HTTPException(status_code=404, detail="Accompaniment track not found")
-			stream_path = accompaniment_path
-			filename = "accompaniment"
-		else:  # both
-			if not vocals_path.exists() or not accompaniment_path.exists():
-				raise HTTPException(status_code=404, detail="Audio tracks not found")
-			# For "both", stream the mix (vocals + accompaniment)
-			# Use vocals as primary, as both are available
-			stream_path = vocals_path
-			filename = "preview"
+		stream_path = _resolve(file_type)
+		if stream_path is None:
+			raise HTTPException(status_code=404, detail=f"{file_type.capitalize()} track not found")
+		filename = file_type
 
 		file_size = stream_path.stat().st_size
 		range_header = request.headers.get("range") if request else None
@@ -499,19 +598,26 @@ async def process_speed_adjustment(
 	speed: float = Query(1.0, ge=0.5, le=2.0),
 ) -> dict[str, Any]:
 	"""
-	Process speed adjustment for a completed task.
+	Queue speed adjustment for a completed task's separated stems.
+
+	Reads the master vocals/accompaniment files for task_id and, for any
+	speed other than 1.0, queues a Celery job (apply_speed_task) that writes
+	pitch-preserving time-stretched copies without touching the masters.
+	Poll the returned `task_id` via GET /api/status/{task_id}; once SUCCESS,
+	download the result with GET /api/download/{task_id}/{vocals|accompaniment}?speed={speed}
+	(task_id there is the *original* task_id from the path, not the one
+	returned by this endpoint).
 
 	Args:
-		task_id: ID of the processed task
+		task_id: ID of the already-separated source task
 		speed: Speed factor (0.5-2.0, default 1.0)
 
 	Returns:
-		JSON with status and processing info
+		JSON with the queued job's task_id and processing info
 
 	Raises:
 		HTTPException 400: If speed is invalid
 		HTTPException 404: If task output not found
-		HTTPException 500: If processing fails
 	"""
 	# Validate speed is supported
 	supported_speeds = list(SUPPORTED_SPEEDS.keys())
@@ -532,21 +638,29 @@ async def process_speed_adjustment(
 			detail="Task output not found. Please complete separation first.",
 		)
 
-	# If speed is 1.0, no processing needed
+	# If speed is 1.0, the master stems already are 1.0x - nothing to do
 	if speed == 1.0:
 		return {
 			"status": "completed",
 			"task_id": task_id,
 			"speed": speed,
 			"message": "Speed 1.0x (no adjustment needed)",
+			"vocals_url": f"/api/download/{task_id}/vocals",
+			"accompaniment_url": f"/api/download/{task_id}/accompaniment",
 		}
 
-	# For speeds != 1.0, return processing status
-	# (In production, would queue async task for speed adjustment)
+	# Estimate duration from file size (avoids loading the audio just to time it)
+	approx_bitrate_bps = 192_000
+	audio_seconds = (vocal_files[0].stat().st_size * 8) / approx_bitrate_bps
+	estimated_duration_seconds = round(audio_seconds * 2)
+
+	job = apply_speed_task.apply_async(args=[task_id, speed])
+
 	return {
 		"status": "processing",
-		"task_id": task_id,
+		"task_id": job.id,
+		"source_task_id": task_id,
 		"speed": speed,
 		"message": f"Speed adjustment queued for {speed}x",
-		"estimated_duration_seconds": 120,  # ~2 minutes for typical 1-minute audio
+		"estimated_duration_seconds": estimated_duration_seconds,
 	}

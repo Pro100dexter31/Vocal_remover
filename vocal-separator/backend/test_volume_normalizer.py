@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from volume_normalizer import (
+from .volume_normalizer import (
     detect_peak_dbfs,
     calculate_gain_for_peak,
     normalize_peak,

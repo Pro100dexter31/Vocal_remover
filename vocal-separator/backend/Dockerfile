@@ -8,12 +8,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg libsndfile1 \
+    && apt-get install -y --no-install-recommends ffmpeg libsndfile1 curl unzip \
     && rm -rf /var/lib/apt/lists/* \
     && addgroup --system app \
     && adduser --system --ingroup app app
 
-COPY backend/requirements.txt /app/backend/requirements.txt
+# Deno: yt-dlp (Feature 7) needs a JS runtime to solve YouTube's signature
+# challenges - without one, extraction fails with a misleading "video
+# unavailable" error instead of the real cause.
+ENV DENO_INSTALL=/usr/local
+RUN curl -fsSL https://deno.land/install.sh | sh
+
+COPY backend/requirements.txt backend/requirements-dev.txt /app/backend/
 
 # On arm64 the default PyPI wheels are already CPU-only; on amd64 the dedicated
 # CPU index avoids pulling in the multi-gigabyte CUDA runtime.
@@ -26,6 +32,7 @@ RUN pip install --upgrade pip \
        fi \
     && grep -Ev '^(torch|torchaudio)==' /app/backend/requirements.txt > /tmp/requirements-rest.txt \
     && pip install -r /tmp/requirements-rest.txt \
+    && pip install -r /app/backend/requirements-dev.txt \
     && rm /tmp/requirements-rest.txt
 
 # Bake the pretrained model into the image so the first job does not wait on a download.

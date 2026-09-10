@@ -3,10 +3,12 @@ import { useEffect, useState } from 'react';
 function SpeedControl({
   taskId,
   originalDuration = 0,
+  value = 1.0,
   onSpeedChange = null,
   isProcessing = false,
+  statusMessage = '',
 }) {
-  const [selectedSpeed, setSelectedSpeed] = useState(1.0);
+  const [selectedSpeed, setSelectedSpeed] = useState(value);
   const [newDuration, setNewDuration] = useState(originalDuration);
 
   const speedOptions = [
@@ -137,8 +139,13 @@ function SpeedControl({
         <div className="mt-4 rounded-lg bg-yellow-900/30 p-3">
           <div className="flex items-center gap-2">
             <div className="h-4 w-4 animate-spin rounded-full border-2 border-yellow-400 border-t-transparent" />
-            <span className="text-xs text-yellow-300">Processing speed adjustment...</span>
+            <span className="text-xs text-yellow-300">{statusMessage || 'Processing speed adjustment...'}</span>
           </div>
+        </div>
+      )}
+      {!isProcessing && statusMessage && (
+        <div className="mt-4 rounded-lg bg-red-900/30 p-3">
+          <span className="text-xs text-red-300">{statusMessage}</span>
         </div>
       )}
     </div>

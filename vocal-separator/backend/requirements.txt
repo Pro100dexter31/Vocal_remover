@@ -42,4 +42,8 @@ librosa==0.10.0
 scipy==1.11.4
 
 # FFmpeg wrapper for advanced audio operations (optional but recommended)
-ffmpeg-python==0.2.1
+ffmpeg-python==0.2.0
+
+# YouTube audio extraction (Feature 7) - updated frequently to keep up with
+# YouTube's internal changes; bump this if extraction starts failing.
+yt-dlp==2026.8.19
