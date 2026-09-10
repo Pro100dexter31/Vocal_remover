@@ -896,3 +896,14 @@ async def process_pitch_adjustment(
 		"message": f"Pitch shift queued for {semitones:+g} semitones",
 		"estimated_duration_seconds": estimated_duration_seconds,
 	}
+
+
+# Serve the React build when it is bundled next to the backend (single-container
+# / Hugging Face Spaces deploy). Skipped in local docker-compose, where nginx
+# serves the frontend and this directory does not exist. Mounted last so every
+# /api route above keeps priority.
+_spa_dir = Path(__file__).resolve().parent.parent / "frontend_build"
+if _spa_dir.is_dir():
+	from fastapi.staticfiles import StaticFiles
+
+	app.mount("/", StaticFiles(directory=str(_spa_dir), html=True), name="spa")

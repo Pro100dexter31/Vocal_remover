@@ -1,6 +1,21 @@
+---
+title: Vocal Separator
+emoji: 🎤
+colorFrom: purple
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Vocal Separator
 
 Vocal Separator is a full-stack application that separates vocals from accompaniment in audio files. Upload a track from the web interface and receive downloadable WAV stems through an asynchronous processing pipeline.
+
+> **Hugging Face Spaces note:** the `Dockerfile` at the repo root runs the
+> whole stack (redis + Celery worker + FastAPI, which also serves the React
+> build) in one container via supervisord. For local development use
+> `docker compose up` instead — see below.
 
 ## Features
 
