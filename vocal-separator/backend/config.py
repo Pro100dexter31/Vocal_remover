@@ -8,9 +8,14 @@ from urllib.parse import quote
 from dotenv import load_dotenv
 
 
-# Load backend/.env before reading any configuration values.
+# Load environment variables from .env file if it exists, otherwise use environment vars from docker-compose
 BASE_DIR = Path(__file__).resolve().parent
-load_dotenv(BASE_DIR / ".env")
+_env_path = BASE_DIR / ".env"
+if _env_path.exists():
+	load_dotenv(_env_path)
+else:
+	# In Docker, rely on docker-compose environment: section (set via compose.yml)
+	load_dotenv()
 
 
 # Redis connection settings used by Celery.

@@ -235,7 +235,7 @@ async def upload_audio(
 
 
 @app.post("/api/audio-info")
-async def get_audio_info(file: UploadFile = File(...)) -> dict[str, any]:
+async def get_audio_info(file: UploadFile = File(...)) -> dict[str, Any]:
 	"""Get audio file information without processing.
 
 	Returns duration and other metadata for timeline display.

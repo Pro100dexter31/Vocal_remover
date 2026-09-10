@@ -32,6 +32,12 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       NUMBA_CACHE_DIR: /tmp/numba_cache
+      # Phase 1 Optimizations
+      RETENTION_HOURS: "1"
+      CLEANUP_INTERVAL_MINUTES: "15"
+      MODEL_IDLE_TIMEOUT_SECONDS: "150"
+      MP3_BITRATE: "128k"
+      DEMUCS_OVERLAP: "0.1"
     depends_on:
       redis:
         condition: service_healthy
@@ -57,6 +63,12 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       NUMBA_CACHE_DIR: /tmp/numba_cache
+      # Phase 1 Optimizations
+      RETENTION_HOURS: "1"
+      CLEANUP_INTERVAL_MINUTES: "15"
+      MODEL_IDLE_TIMEOUT_SECONDS: "150"
+      MP3_BITRATE: "128k"
+      DEMUCS_OVERLAP: "0.1"
     depends_on:
       redis:
         condition: service_healthy
